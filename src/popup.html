@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>DarkLaunching by LaunchDarkly</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <header class="header">
+      <div class="brand">
+        <h1>DarkLaunching by LaunchDarkly</h1>
+        <span id="status-dot" class="dot is-off" role="status" aria-label="Disconnected" title="Disconnected"></span>
+      </div>
+      <p id="site-status" class="site-status" hidden></p>
+    </header>
+
+    <section aria-label="Authentication, connection, and targeting">
+      <div class="action-row">
+        <button type="button" id="import-config">Import Config</button>
+        <button type="button" id="clear-settings" hidden>Clear settings</button>
+      </div>
+      <input id="import-file" type="file" accept="application/json,.json" hidden>
+      <div class="divider">or enter manually</div>
+      <label>
+        LaunchDarkly API Key
+        <input id="api-key" type="password" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="help">The token needs a Writer role or a custom role allowing flag create, update, and delete.</p>
+      <p id="api-key-error" class="error" hidden></p>
+      <label>
+        Customer Name
+        <input id="customer-name" type="text" autocomplete="off" spellcheck="false">
+      </label>
+      <p id="customer-preview" class="help" hidden></p>
+      <p id="customer-error" class="error" hidden></p>
+      <label>
+        Target Domain
+        <input id="target-domain" type="text" placeholder="launchdarkly.com" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="help">Hostname only. Protocol, www, path, and port are removed.</p>
+      <p id="domain-error" class="error" hidden>
+        <span class="message-text"></span>
+        <span class="tip" hidden>
+          <button type="button" class="tip-icon" aria-label="How to allow site access">i</button>
+          <span class="tip-bubble" role="tooltip">From Chrome’s extension page<br>Open chrome://extensions.<br>Find DarkLaunching and click Details.<br>Under Site access, choose On all sites, or choose On specific sites and add the target domain.</span>
+        </span>
+      </p>
+      <button type="button" id="connect" class="primary">Connect</button>
+      <p id="connect-error" class="error" role="alert" hidden></p>
+      <p id="notice" class="notice" hidden></p>
+    </section>
+
+    <section aria-label="User context">
+      <h2>User context</h2>
+      <label class="check">
+        <span>Anonymous user</span>
+        <input id="anonymous" type="checkbox" checked>
+      </label>
+      <p class="help">Checked uses a generated key and sets anonymous to true. Cleared uses the user key and sets anonymous to false.</p>
+      <label>
+        User Key
+        <input id="user-key" type="text" placeholder="jane.doe@acme.com" autocomplete="off" disabled>
+      </label>
+      <p id="user-key-error" class="error" hidden></p>
+      <h3>Context Attributes (auto-detected)</h3>
+      <dl class="attrs">
+        <dt>OS</dt>
+        <dd id="attr-os">Detecting…</dd>
+        <dt>Browser</dt>
+        <dd id="attr-browser">Detecting…</dd>
+        <dt title="Country is an IP-based approximation and can be affected by VPNs.">Country</dt>
+        <dd id="attr-country" title="Country is an IP-based approximation and can be affected by VPNs.">Detecting…</dd>
+        <dt>Org</dt>
+        <dd id="attr-org">Not set</dd>
+        <dt>Domain</dt>
+        <dd id="attr-domain">Not set</dd>
+      </dl>
+      <div id="attribute-list"></div>
+      <div id="attribute-actions" class="action-row">
+        <button type="button" id="add-attribute">+ Add attribute</button>
+        <button type="button" id="update-context">Update</button>
+      </div>
+      <p class="help">Update applies these attributes to the user context, the preview, and flag evaluation.</p>
+      <details>
+        <summary>Context preview</summary>
+        <pre id="context-json">Detecting context attributes…</pre>
+      </details>
+      <p id="context-delivery" class="help" hidden></p>
+    </section>
+
+    <section id="environment-section" hidden aria-label="Environment">
+      <p id="sdk-status" class="error" hidden></p>
+      <label>
+        Client ID
+        <input id="client-id-input" type="text" placeholder="Paste a client-side ID" autocomplete="off" spellcheck="false">
+      </label>
+      <p class="help">Enter a client-side ID to select its project and environment and load flags created by DarkLaunching.</p>
+      <p id="client-id-status" class="help" hidden></p>
+      <p id="client-id-error" class="error" hidden></p>
+      <dl class="attrs">
+        <dt>Project</dt>
+        <dd id="project-name">Not selected</dd>
+        <dt>Environment</dt>
+        <dd id="environment-name">Not selected</dd>
+      </dl>
+    </section>
+
+    <section id="flags-section" hidden aria-label="Feature flag manager">
+      <div id="div-list"></div>
+      <p id="div-empty" class="help">No selectors yet. In DevTools, right-click the element and choose Copy, then Copy selector.</p>
+      <button type="button" id="add-div">+ Add CSS selector</button>
+      <button type="button" id="update-flags" class="primary">Update Flags</button>
+      <p class="help">New flags are created with targeting OFF. Turn targeting ON in LaunchDarkly to serve variations other than the default.</p>
+      <div id="sync-results" aria-live="polite"></div>
+    </section>
+
+    <footer>
+      <button type="button" id="export-config">Export Config</button>
+    </footer>
+
+    <div id="modal" class="modal" hidden>
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+        <h2 id="modal-title"></h2>
+        <p id="modal-body"></p>
+        <ul id="modal-list" hidden></ul>
+        <div class="modal-actions">
+          <button type="button" id="modal-cancel">Cancel</button>
+          <button type="button" id="modal-keep" hidden>Clear settings, keep API key and client SDK key</button>
+          <button type="button" id="modal-confirm" class="primary">Confirm</button>
+        </div>
+      </div>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

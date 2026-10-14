@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "DarkLaunching",
+  "version": "1.0.0",
+  "description": "Create and evaluate LaunchDarkly flags that hide or block elements on a target domain.",
+  "minimum_chrome_version": "120",
+  "action": {
+    "default_title": "DarkLaunching by LaunchDarkly",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js"
+  },
+  "permissions": ["storage", "activeTab", "tabs", "scripting"],
+  "host_permissions": [
+    "https://app.launchdarkly.com/*",
+    "https://clientsdk.launchdarkly.com/*",
+    "https://clientstream.launchdarkly.com/*",
+    "https://events.launchdarkly.com/*",
+    "https://www.cloudflare.com/cdn-cgi/trace"
+  ],
+  "optional_host_permissions": ["https://*/*", "http://*/*"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

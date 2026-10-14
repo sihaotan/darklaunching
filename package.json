@@ -1,0 +1,17 @@
+{
+  "name": "darklaunching",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Chrome extension that manages LaunchDarkly flags for DOM elements on a target domain.",
+  "scripts": {
+    "build": "node scripts/build.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@launchdarkly/js-client-sdk": "4.11.2"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10"
+  }
+}
