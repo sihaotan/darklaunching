@@ -1,9 +1,27 @@
 export const LD_EVENTS_ORIGIN = 'https://events.launchdarkly.com';
 
+const TELEMETRY_HOSTS = new Set([
+  'events.launchdarkly.com',
+  'clientsdk.launchdarkly.com',
+  'clientstream.launchdarkly.com',
+  'pub.observability.app.launchdarkly.com',
+  'otel.observability.app.launchdarkly.com',
+  'pub.observability.app.eu.launchdarkly.com',
+  'otel.observability.app.eu.launchdarkly.com'
+]);
+
 export function isLaunchDarklyEventsUrl(value) {
+  return isLaunchDarklyHost(value, new Set(['events.launchdarkly.com']));
+}
+
+export function isLaunchDarklyTelemetryUrl(value) {
+  return isLaunchDarklyHost(value, TELEMETRY_HOSTS);
+}
+
+function isLaunchDarklyHost(value, hosts) {
   try {
     const url = new URL(value);
-    return url.protocol === 'https:' && url.hostname === 'events.launchdarkly.com' && url.username === '' && url.password === '';
+    return url.protocol === 'https:' && hosts.has(url.hostname) && url.username === '' && url.password === '';
   } catch {
     return false;
   }

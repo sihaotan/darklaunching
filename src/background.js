@@ -1,9 +1,9 @@
 import { listAllFlags, listProjects } from './lib/api.js';
-import { cleanSettings, preserveDivs, validateConnectionInput } from './lib/config.js';
-import { hostMatchesTarget, isValidHostname, permissionOrigins, toolbarIconColored } from './lib/domain.js';
+import { cleanSettings, preserveDivs, validateApiKey, validateConnectionInput } from './lib/config.js';
+import { hostMatchesTarget, isValidHostname, normalizeDomain, permissionOrigins, toolbarIconColored } from './lib/domain.js';
 import { OWNERSHIP_TAG, ownedFlagSummary, planSync } from './lib/flags.js';
 import { ANON_KEY, CONTEXT_DELIVERY_KEY, LAST_SYNC_KEY, REGISTRATION_KEY, SETTINGS_KEY } from './lib/keys.js';
-import { contextEventBatch, isClientSideId, isLaunchDarklyEventsUrl, LD_EVENTS_ORIGIN } from './lib/events.js';
+import { contextEventBatch, isClientSideId, isLaunchDarklyEventsUrl, isLaunchDarklyTelemetryUrl, LD_EVENTS_ORIGIN } from './lib/events.js';
 import { MSG } from './lib/messages.js';
 import { selectProjectEnvironment } from './lib/projects.js';
 import { executeSync, summarizeResults } from './lib/sync.js';
@@ -74,6 +74,11 @@ async function injectMatchingTabs(domain) {
       }
       if (!hostMatchesTarget(hostname, domain)) return;
       try {
+        await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['telemetry.js'], world: 'MAIN' });
+      } catch {
+        // The page can still evaluate flags when telemetry cannot load.
+      }
+      try {
         await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
       } catch {
         // Restricted pages and discarded tabs cannot accept the script.
@@ -85,9 +90,8 @@ async function injectMatchingTabs(domain) {
 async function syncRegistrationNow() {
   try {
     const registered = await chrome.scripting.getRegisteredContentScripts();
-    if (registered.some((script) => script.id === SCRIPT_ID)) {
-      await chrome.scripting.unregisterContentScripts({ ids: [SCRIPT_ID] });
-    }
+    const ids = [SCRIPT_ID, `${SCRIPT_ID}-telemetry`].filter((id) => registered.some((script) => script.id === id));
+    if (ids.length) await chrome.scripting.unregisterContentScripts({ ids });
   } catch {
     // Registration state is rebuilt below.
   }
@@ -108,6 +112,15 @@ async function syncRegistrationNow() {
 
   try {
     await chrome.scripting.registerContentScripts([
+      {
+        id: `${SCRIPT_ID}-telemetry`,
+        matches: origins,
+        js: ['telemetry.js'],
+        world: 'MAIN',
+        runAt: 'document_start',
+        persistAcrossSessions: true,
+        allFrames: false
+      },
       {
         id: SCRIPT_ID,
         matches: origins,
@@ -145,15 +158,16 @@ async function connect(message) {
   if (disconnectRequested) return cancelledConnection();
   const apiKey = await readApiKey();
   const existing = await loadSettings();
+  const apiValidation = validateApiKey(apiKey);
+  if (!apiValidation.ok) return { ok: false, error: apiValidation.error };
   const customerName = String(message.customerName ?? existing.customerName).trim();
-  const targetDomain = String(message.targetDomain ?? existing.targetDomain);
-  const validation = validateConnectionInput({ apiKey, customerName, targetDomain });
-  if (!validation.ok) return { ok: false, error: Object.values(validation.errors)[0] };
+  const requestedDomain = normalizeDomain(String(message.targetDomain ?? existing.targetDomain));
+  const targetDomain = isValidHostname(requestedDomain) ? requestedDomain : requestedDomain ? existing.targetDomain : '';
 
   const base = {
     ...existing,
-    customerName: validation.customerName,
-    targetDomain: validation.domain,
+    customerName,
+    targetDomain,
     anonymous: Boolean(message.anonymous),
     userKey: String(message.userKey ?? ''),
     divs: Array.isArray(message.divs) ? message.divs : existing.divs
@@ -334,20 +348,35 @@ async function publishContext(message) {
   return delivery;
 }
 
+function decodeRelayBody(message) {
+  if (message?.encoding === 'base64') {
+    const binary = atob(String(message.body || ''));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+  return typeof message?.body === 'string' ? message.body : '';
+}
+
 async function relayEvents(message) {
   const url = String(message?.url || '');
-  if (!isLaunchDarklyEventsUrl(url) || String(message?.method || 'POST').toUpperCase() !== 'POST') {
+  const method = String(message?.method || 'POST').toUpperCase();
+  if (!isLaunchDarklyTelemetryUrl(url) || (method !== 'POST' && method !== 'GET')) {
     return { ok: false, error: 'Refused LaunchDarkly events request.' };
   }
-  const body = typeof message.body === 'string' ? message.body : '';
-  if (body.length > 1_000_000) return { ok: false, error: 'LaunchDarkly events payload is too large.' };
+  const body = method === 'GET' ? undefined : decodeRelayBody(message);
+  const size = body == null ? 0 : typeof body === 'string' ? body.length : body.byteLength;
+  const limit = isLaunchDarklyEventsUrl(url) || !url.includes('.observability.') ? 1_000_000 : 16_000_000;
+  if (size > limit) return { ok: false, error: 'LaunchDarkly events payload is too large.' };
   const headers = {};
   if (message.headers && typeof message.headers === 'object') {
     for (const [key, value] of Object.entries(message.headers)) {
+      const name = key.toLowerCase();
+      if (name === 'cookie' || name === 'authorization' || name === 'proxy-authorization') continue;
       if (typeof value === 'string') headers[key] = value;
     }
   }
-  const response = await fetch(url, { method: 'POST', headers, body });
+  const response = await fetch(url, body === undefined ? { method, headers } : { method, headers, body });
   const responseHeaders = {};
   response.headers.forEach((value, key) => {
     responseHeaders[key] = value;

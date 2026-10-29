@@ -12,6 +12,9 @@ export function defaultSettings() {
     projects: [],
     anonymous: true,
     userKey: '',
+    observability: false,
+    sessionReplay: false,
+    collecting: false,
     attributes: [],
     divs: [],
     connected: false,
@@ -92,11 +95,19 @@ export function cleanSettings(partial = {}, uuid = createUuid) {
     projects: normalizeStoredProjects(merged.projects),
     anonymous: Boolean(merged.anonymous),
     userKey: String(merged.userKey ?? ''),
+    observability: Boolean(merged.observability),
+    sessionReplay: Boolean(merged.sessionReplay),
+    collecting: Boolean(merged.collecting),
     attributes: normalizeStoredAttributes(merged.attributes, uuid),
     divs: Array.isArray(merged.divs) ? merged.divs.map((div) => normalizeStoredDiv(div, uuid)) : [],
     connected: Boolean(merged.connected),
     notice: String(merged.notice ?? '')
   };
+}
+
+export function validateApiKey(apiKey) {
+  if (!String(apiKey ?? '').trim()) return { ok: false, error: 'API key is required.' };
+  return { ok: true, error: '' };
 }
 
 export function validateConnectionInput({ apiKey, customerName, targetDomain }) {
@@ -129,6 +140,8 @@ export function buildExportPayload(state) {
     targetDomain: normalizeDomain(state.targetDomain || ''),
     projectKey: String(state.projectKey ?? ''),
     environmentKey: String(state.environmentKey ?? ''),
+    observability: Boolean(state.observability),
+    sessionReplay: Boolean(state.sessionReplay),
     userContext: {
       anonymous: Boolean(state.anonymous),
       userKey: String(state.userKey ?? ''),
@@ -164,6 +177,8 @@ export function parseImportedConfig(data, uuid = createUuid) {
   const domain = normalizeDomain(data.targetDomain);
   if (!domain || !isValidHostname(domain)) throw invalid('Config file has an invalid targetDomain.');
 
+  const observability = optionalBoolean(data.observability, 'observability');
+  const sessionReplay = optionalBoolean(data.sessionReplay, 'sessionReplay');
   let anonymous = true;
   let userKey = '';
   let attributes = [];
@@ -215,7 +230,15 @@ export function parseImportedConfig(data, uuid = createUuid) {
     environmentKey: typeof data.environmentKey === 'string' ? data.environmentKey : '',
     anonymous,
     userKey,
+    observability,
+    sessionReplay,
     attributes,
     divs
   };
+}
+
+function optionalBoolean(value, name) {
+  if (value == null) return false;
+  if (typeof value !== 'boolean') throw invalid(`${name} must be a boolean.`);
+  return value;
 }

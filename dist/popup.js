@@ -200,6 +200,15 @@
     const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
+  function anonymousKeyForDomain({ anonymous, key, keyDomain, domain, uuid = createUuid }) {
+    const nextDomain = String(domain ?? "").trim();
+    const currentKey = typeof key === "string" ? key.trim() : "";
+    const currentDomain = typeof keyDomain === "string" ? keyDomain.trim() : "";
+    if (!anonymous || !nextDomain || currentKey && currentDomain === nextDomain) {
+      return { key: currentKey, domain: currentDomain };
+    }
+    return { key: uuid(), domain: nextDomain };
+  }
 
   // src/lib/domain.js
   function normalizeDomain(input) {
@@ -273,6 +282,9 @@
       projects: [],
       anonymous: true,
       userKey: "",
+      observability: false,
+      sessionReplay: false,
+      collecting: false,
       attributes: [],
       divs: [],
       connected: false,
@@ -325,11 +337,18 @@
       projects: normalizeStoredProjects(merged.projects),
       anonymous: Boolean(merged.anonymous),
       userKey: String(merged.userKey ?? ""),
+      observability: Boolean(merged.observability),
+      sessionReplay: Boolean(merged.sessionReplay),
+      collecting: Boolean(merged.collecting),
       attributes: normalizeStoredAttributes(merged.attributes, uuid),
       divs: Array.isArray(merged.divs) ? merged.divs.map((div) => normalizeStoredDiv(div, uuid)) : [],
       connected: Boolean(merged.connected),
       notice: String(merged.notice ?? "")
     };
+  }
+  function validateApiKey(apiKey) {
+    if (!String(apiKey ?? "").trim()) return { ok: false, error: "API key is required." };
+    return { ok: true, error: "" };
   }
   function validateConnectionInput({ apiKey, customerName, targetDomain }) {
     const errors = {};
@@ -359,6 +378,8 @@
       targetDomain: normalizeDomain(state2.targetDomain || ""),
       projectKey: String(state2.projectKey ?? ""),
       environmentKey: String(state2.environmentKey ?? ""),
+      observability: Boolean(state2.observability),
+      sessionReplay: Boolean(state2.sessionReplay),
       userContext: {
         anonymous: Boolean(state2.anonymous),
         userKey: String(state2.userKey ?? ""),
@@ -390,6 +411,8 @@
     if (data.environmentKey != null && typeof data.environmentKey !== "string") throw invalid("environmentKey must be a string.");
     const domain = normalizeDomain(data.targetDomain);
     if (!domain || !isValidHostname(domain)) throw invalid("Config file has an invalid targetDomain.");
+    const observability = optionalBoolean(data.observability, "observability");
+    const sessionReplay = optionalBoolean(data.sessionReplay, "sessionReplay");
     let anonymous = true;
     let userKey = "";
     let attributes = [];
@@ -439,9 +462,16 @@
       environmentKey: typeof data.environmentKey === "string" ? data.environmentKey : "",
       anonymous,
       userKey,
+      observability,
+      sessionReplay,
       attributes,
       divs
     };
+  }
+  function optionalBoolean(value, name) {
+    if (value == null) return false;
+    if (typeof value !== "boolean") throw invalid(`${name} must be a boolean.`);
+    return value;
   }
 
   // src/lib/dom.js
@@ -503,8 +533,9 @@
   }
   function selectorFromDescription(description) {
     const value = String(description ?? "").trim();
-    if (!value || !/[#.\[>:~+]/.test(value)) return "";
-    return isValidCssSelector(value) ? value : "";
+    if (!value || !isValidCssSelector(value)) return "";
+    if (/\s/.test(value) && !/[#.\[>:~+]/.test(value)) return "";
+    return value;
   }
   function rowsFromOwnedFlags({ flags, customerName, environmentKey, existingDivs = [], uuid = () => "" }) {
     const customer = String(customerName || "").trim();
@@ -524,10 +555,11 @@
       const previous = existingByKey.get(flag.key) || existingByKey.get(flagIdentity(customer, name).key);
       if (previous?.id) usedIds.add(previous.id);
       const off = offVariationValue(flag, environmentKey);
+      const described = selectorFromDescription(flag.description);
       return {
         id: previous?.id || uuid(),
         name,
-        selector: String(previous?.selector || selectorFromDescription(flag.description) || ""),
+        selector: described || String(previous?.selector || ""),
         defaultState: typeof off === "boolean" ? off : false,
         whenFalse: previous?.whenFalse === "show" ? "show" : "hide"
       };
@@ -582,11 +614,13 @@
   // src/lib/keys.js
   var SETTINGS_KEY = "settings";
   var ANON_KEY = "anonymousUserKey";
+  var ANON_DOMAIN_KEY = "anonymousUserDomain";
   var COUNTRY_CACHE_KEY = "countryCache";
   var SDK_STATUS_KEY = "sdkStatus";
   var CONTEXT_DELIVERY_KEY = "contextDelivery";
   var LAST_SYNC_KEY = "lastSyncResult";
   var REGISTRATION_KEY = "registrationStatus";
+  var DIV_SNAPSHOT_KEY = "divSnapshot";
 
   // src/lib/projects.js
   function findEnvironmentByClientId(projects, clientId) {
@@ -597,6 +631,12 @@
       if (environment) return { project, environment };
     }
     return null;
+  }
+  function clientEnvironmentReady({ connected, projects, clientSideId, projectKey, environmentKey }) {
+    if (!connected) return false;
+    const match = findEnvironmentByClientId(projects, clientSideId);
+    if (!match?.project?.key || !match?.environment?.key) return false;
+    return match.project.key === projectKey && match.environment.key === environmentKey;
   }
 
   // src/lib/messages.js
@@ -707,21 +747,26 @@
   var customerNameInput = $("customer-name");
   var targetDomainInput = $("target-domain");
   var anonymousInput = $("anonymous");
+  var observabilityInput = $("observability");
+  var sessionReplayInput = $("session-replay");
   var userKeyInput = $("user-key");
   var projectName = $("project-name");
   var environmentName = $("environment-name");
   var divList = $("div-list");
   var divEmpty = $("div-empty");
   var connectButton = $("connect");
+  var startButton = $("start-target");
   var updateButton = $("update-flags");
   var importButton = $("import-config");
   var clearButton = $("clear-settings");
   var fileInput = $("import-file");
   var exportButton = $("export-config");
   var addButton = $("add-div");
+  var refreshDivsButton = $("refresh-divs");
   var statusDot = $("status-dot");
   var siteStatus = $("site-status");
   var clientIdInput = $("client-id-input");
+  var confirmClientIdButton = $("confirm-client-id");
   var clientIdStatus = $("client-id-status");
   var clientIdError = $("client-id-error");
   var contextJson = $("context-json");
@@ -735,6 +780,8 @@
   var addAttributeButton = $("add-attribute");
   var updateContextButton = $("update-context");
   var environmentSection = $("environment-section");
+  var targetSection = $("target-section");
+  var userContextSection = $("user-context-section");
   var flagsSection = $("flags-section");
   var syncResults = $("sync-results");
   var modal = $("modal");
@@ -750,6 +797,7 @@
   var customerPreview = $("customer-preview");
   var domainError = $("domain-error");
   var connectError = $("connect-error");
+  var targetError = $("target-error");
   var notice = $("notice");
   var userKeyError = $("user-key-error");
   var sdkStatus = $("sdk-status");
@@ -757,6 +805,7 @@
     ...defaultSettings(),
     apiKey: "",
     anonymousUserKey: "",
+    anonymousKeyDomain: "",
     os: "Detecting\u2026",
     browser: "Detecting\u2026",
     country: "Detecting\u2026",
@@ -765,6 +814,7 @@
   };
   var serverRowErrors = {};
   var persistTimer = 0;
+  var savedDivs = [];
   var applyingClientId = false;
   var loadedClientId = "";
   var clientLookup = 0;
@@ -811,6 +861,9 @@
       projects: state.projects,
       anonymous: state.anonymous,
       userKey: state.userKey,
+      observability: state.observability,
+      sessionReplay: state.sessionReplay,
+      collecting: state.collecting,
       attributes: state.attributes,
       divs: state.divs,
       connected: state.connected,
@@ -822,14 +875,43 @@
     state.customerName = customerNameInput.value;
     state.targetDomain = keepDomain ? preserveText(state.targetDomain, targetDomainInput.value) : targetDomainInput.value;
     state.anonymous = anonymousInput.checked;
+    state.observability = observabilityInput.checked;
+    state.sessionReplay = sessionReplayInput.checked;
     state.userKey = userKeyInput.value;
     if (!keepDivs) readDivsFromDom();
     if (!keepAttributes) readAttributesFromDom();
   }
+  var anonymousKeyWrite = Promise.resolve();
+  async function assignAnonymousKey(domain) {
+    const next = anonymousKeyForDomain({
+      anonymous: state.anonymous,
+      key: state.anonymousUserKey,
+      keyDomain: state.anonymousKeyDomain,
+      domain: normalizeDomain(domain || "")
+    });
+    if (next.key === state.anonymousUserKey && next.domain === state.anonymousKeyDomain) {
+      await anonymousKeyWrite;
+      return;
+    }
+    state.anonymousUserKey = next.key;
+    state.anonymousKeyDomain = next.domain;
+    updateContextPreview();
+    const write = chrome.storage.local.set({
+      [ANON_KEY]: state.anonymousUserKey,
+      [ANON_DOMAIN_KEY]: state.anonymousKeyDomain
+    });
+    anonymousKeyWrite = write;
+    await write;
+  }
+  var persistSerial = 0;
   async function persist({ keepDivs = false, keepDomain = false } = {}) {
     captureForm({ keepDivs, keepDomain });
-    await writeExtensionApiKey(state.apiKey);
-    await chrome.storage.local.set({ [SETTINGS_KEY]: settingsFromState() });
+    const serial = ++persistSerial;
+    const settings = settingsFromState();
+    const apiKey = state.apiKey;
+    await writeExtensionApiKey(apiKey);
+    if (serial !== persistSerial) return;
+    await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
   }
   function schedulePersist() {
     clearTimeout(persistTimer);
@@ -883,6 +965,9 @@
     updateVisibility();
     editVersion += 1;
     await persist();
+    await writeDivSnapshot(state.divs);
+    if (token !== clientLookup) return;
+    await reinstrumentPage();
     if (token !== clientLookup) return;
     setMessage(clientIdError, "");
     setMessage(
@@ -891,21 +976,26 @@
     );
     loadedClientId = state.clientSideId;
   }
+  function setClientIdInvalid(invalid2) {
+    clientIdInput.classList.toggle("is-invalid", invalid2);
+  }
   async function lookupClientId({ reportMiss = false } = {}) {
-    if (applyingClientId || state.busy) return;
+    if (applyingClientId || state.busy || state.collecting) return;
     const token = ++clientLookup;
     const value = clientIdInput.value.trim();
-    if (!value) {
-      setMessage(clientIdError, "");
-      setMessage(clientIdStatus, "");
-      return;
-    }
     const match = findEnvironmentByClientId(state.projects, value);
-    if (!match) {
+    if (!value || !match) {
       setMessage(clientIdStatus, "");
-      if (reportMiss) setMessage(clientIdError, "No environment uses this client ID.");
+      if (reportMiss) {
+        setClientIdInvalid(true);
+        setMessage(clientIdError, value ? "No environment uses this client ID." : "Enter a client ID.");
+      } else {
+        setMessage(clientIdError, "");
+      }
+      updateVisibility();
       return;
     }
+    setClientIdInvalid(false);
     setMessage(clientIdError, "");
     const changed = match.project.key !== state.projectKey || match.environment.key !== state.environmentKey || state.clientSideId !== match.environment.clientSideId;
     if (changed) {
@@ -921,11 +1011,50 @@
     if (loadedClientId === state.clientSideId && !changed) return;
     await loadOwnedFlags(token);
   }
+  function setFieldLocked(input, locked) {
+    input.disabled = locked;
+    const field = input.closest(".field");
+    if (!field) return;
+    field.classList.toggle("is-locked", locked);
+    const icon = field.querySelector(".lock");
+    if (icon) icon.hidden = !locked;
+  }
+  function enteredClientId() {
+    return clientIdInput.value.trim();
+  }
   function updateVisibility() {
-    environmentSection.hidden = !state.connected;
-    const configured = state.divs.some((div) => String(div.selector || "").trim() || String(div.name || "").trim());
-    flagsSection.hidden = !(configured || state.connected && state.projectKey && state.environmentKey);
+    const connected = state.connected;
+    const clientSideId = enteredClientId();
+    const clientReady = clientEnvironmentReady({
+      connected,
+      projects: state.projects,
+      clientSideId,
+      projectKey: state.projectKey,
+      environmentKey: state.environmentKey
+    });
+    const collecting = state.collecting;
+    environmentSection.hidden = !connected;
+    targetSection.hidden = !clientReady;
+    userContextSection.hidden = !(clientReady && collecting);
+    if (clientReady) {
+      const match = findEnvironmentByClientId(state.projects, clientSideId);
+      projectName.textContent = match.project.name || match.project.key;
+      environmentName.textContent = match.environment.name || match.environment.key;
+    } else if (connected) {
+      projectName.textContent = "Not selected";
+      environmentName.textContent = "Not selected";
+    }
+    flagsSection.hidden = !(clientReady && collecting);
     clearButton.hidden = state.connected;
+    setFieldLocked(apiKeyInput, state.connected);
+    const targetLocked = state.collecting;
+    setFieldLocked(clientIdInput, targetLocked);
+    confirmClientIdButton.disabled = targetLocked || state.busy;
+    setFieldLocked(customerNameInput, targetLocked);
+    setFieldLocked(targetDomainInput, targetLocked);
+    observabilityInput.disabled = targetLocked;
+    sessionReplayInput.disabled = targetLocked;
+    updateStartButton();
   }
   function updateCustomerPreview() {
     const key = sanitizeKey(state.customerName);
@@ -1175,6 +1304,13 @@
     });
     return row;
   }
+  function cloneDivs(divs) {
+    return cleanSettings({ divs }).divs.map((div) => ({ ...div }));
+  }
+  async function writeDivSnapshot(divs) {
+    savedDivs = cloneDivs(divs);
+    await chrome.storage.local.set({ [DIV_SNAPSHOT_KEY]: savedDivs });
+  }
   function renderDivList() {
     divList.replaceChildren(...state.divs.map(createDivRow));
     paintRowErrors();
@@ -1212,18 +1348,28 @@
     if (state.busy) return;
     connectButton.textContent = state.connected ? "Disconnect" : "Connect";
   }
+  function updateStartButton() {
+    if (state.busy) return;
+    startButton.textContent = state.collecting ? "Stop" : "Start";
+  }
   function setBusy(busy, which) {
     state.busy = busy;
     connectButton.disabled = busy;
+    startButton.disabled = busy;
     updateButton.disabled = busy;
     importButton.disabled = busy;
     clearButton.disabled = busy;
     addButton.disabled = busy;
+    refreshDivsButton.disabled = busy;
+    confirmClientIdButton.disabled = busy || state.collecting;
     addAttributeButton.disabled = busy;
     updateContextButton.disabled = busy;
     if (busy && which === "connect") connectButton.textContent = "Connecting\u2026";
     else if (busy && which === "disconnect") connectButton.textContent = "Disconnecting\u2026";
     else updateConnectButton();
+    if (busy && which === "start") startButton.textContent = "Starting\u2026";
+    else if (busy && which === "stop") startButton.textContent = "Stopping\u2026";
+    else updateStartButton();
     updateButton.textContent = busy && which === "update" ? "Updating\u2026" : "Update Flags";
   }
   function openModal({ title, body, items, confirmLabel, danger, keepLabel }) {
@@ -1240,7 +1386,7 @@
       modalConfirm.textContent = confirmLabel;
       modalConfirm.classList.toggle("danger", Boolean(danger));
       modalKeep.hidden = !keepLabel;
-      modalKeep.textContent = keepLabel || "Clear settings, keep API key and client SDK key";
+      modalKeep.textContent = keepLabel || "Clear settings, keep API key and client ID";
       modalActions.classList.toggle("stacked", Boolean(keepLabel));
       modal.hidden = false;
       const finish = (value) => {
@@ -1363,6 +1509,7 @@
     targetDomainInput.value = state.targetDomain;
     state.customerName = state.customerName.trim();
     customerNameInput.value = state.customerName;
+    await assignAnonymousKey(state.targetDomain);
     await persist({ keepDomain: true });
     const [granted, result] = await Promise.all([
       permissionPromise,
@@ -1419,6 +1566,7 @@
     setBusy(true, "disconnect");
     setMessage(connectError, "");
     state.connected = false;
+    state.collecting = false;
     state.divs = divs;
     state.notice = "";
     setDot(false);
@@ -1442,21 +1590,28 @@
     }
     captureForm();
     editVersion += 1;
-    const validation = validateConnectionInput(connectFields());
-    showConnectionErrors(validation.errors);
-    updateCustomerPreview();
-    if (!validation.ok) return;
-    state.customerName = validation.customerName;
-    state.targetDomain = validation.domain;
-    customerNameInput.value = state.customerName;
-    targetDomainInput.value = state.targetDomain;
-    domainPermissionPending = true;
-    const permissionPromise = chrome.permissions.request({ origins: permissionOrigins(validation.domain) }).catch(() => false);
+    const apiValidation = validateApiKey(state.apiKey);
+    setMessage(apiKeyError, apiValidation.error);
+    setMessage(connectError, "");
+    if (!apiValidation.ok) return;
+    const domain = normalizeDomain(state.targetDomain);
+    const domainReady = Boolean(domain && isValidHostname(domain));
+    if (domain && !domainReady) setMessage(domainError, "Enter a hostname such as launchdarkly.com.");
+    if (domainReady) {
+      state.targetDomain = domain;
+      targetDomainInput.value = domain;
+    }
+    domainPermissionPending = domainReady;
+    const permissionPromise = domainReady ? chrome.permissions.request({ origins: permissionOrigins(domain) }).catch(() => false) : Promise.resolve(true);
     runConnect(permissionPromise).finally(() => {
       domainPermissionPending = false;
     });
   });
   targetDomainInput.addEventListener("change", () => {
+    if (state.collecting) {
+      targetDomainInput.value = state.targetDomain;
+      return;
+    }
     if (!targetDomainInput.value.trim() && domainPermissionPending && state.targetDomain) {
       targetDomainInput.value = state.targetDomain;
       return;
@@ -1470,16 +1625,18 @@
     updateContextPreview();
     updateSiteStatus();
     if (!normalized || !isValidHostname(normalized)) {
-      setMessage(domainError, normalized ? "Enter a hostname such as launchdarkly.com." : "Target domain is required.");
+      setMessage(domainError, normalized ? "Enter a hostname such as launchdarkly.com." : "");
       schedulePersist();
       return;
     }
     setMessage(domainError, "");
+    void assignAnonymousKey(normalized);
     domainPermissionPending = true;
     void persist({ keepDomain: true });
     const permissionPromise = chrome.permissions.request({ origins: permissionOrigins(normalized) }).catch(() => false);
     permissionPromise.then(async (granted) => {
       try {
+        await assignAnonymousKey(normalized);
         await retireDomain(previous, normalized);
         state.persistedDomain = normalized;
         state.targetDomain = normalized;
@@ -1524,6 +1681,116 @@
     updateContextPreview();
     scheduleContextPush();
   });
+  async function applyTelemetryChange() {
+    if (state.collecting) return;
+    state.observability = observabilityInput.checked;
+    state.sessionReplay = sessionReplayInput.checked;
+    editVersion += 1;
+    await persist();
+  }
+  observabilityInput.addEventListener("change", () => {
+    applyTelemetryChange().catch(() => {
+    });
+  });
+  sessionReplayInput.addEventListener("change", () => {
+    applyTelemetryChange().catch(() => {
+    });
+  });
+  function targetTabs() {
+    const target = normalizeDomain(state.targetDomain);
+    return chrome.tabs.query({}).then((tabs) => tabs.filter((tab) => {
+      if (!tab.id || !tab.url || !target) return false;
+      try {
+        return hostMatchesTarget(new URL(tab.url).hostname, target);
+      } catch {
+        return false;
+      }
+    }));
+  }
+  async function startCollection(permissionPromise) {
+    setBusy(true, "start");
+    setMessage(targetError, "");
+    const previousDomain = state.persistedDomain;
+    state.collecting = true;
+    updateVisibility();
+    await assignAnonymousKey(state.targetDomain);
+    await persist({ keepDomain: true });
+    const granted = await permissionPromise;
+    if (previousDomain !== state.targetDomain) await retireDomain(previousDomain, state.targetDomain);
+    if (!granted) {
+      state.collecting = false;
+      await persist({ keepDomain: true });
+      updateVisibility();
+      setMessage(domainError, "Target domain permission was denied. DOM changes stay off until you allow access.");
+      setBusy(false);
+      return;
+    }
+    state.persistedDomain = state.targetDomain;
+    await send({ type: MSG.SYNC_REGISTRATION });
+    const delivered = await messageTabs({ type: MSG.RECONFIGURE, force: true });
+    if (!delivered) {
+      const tabs = await targetTabs();
+      if (tabs.length) {
+        const proceed = await openModal({
+          title: "Reload target page",
+          body: "The target page will reload so Observability and Session replay can start.",
+          confirmLabel: "Reload"
+        });
+        if (!proceed) {
+          state.collecting = false;
+          await persist({ keepDomain: true });
+          updateVisibility();
+          setBusy(false);
+          return;
+        }
+        await Promise.all(tabs.map((tab) => chrome.tabs.reload(tab.id)));
+      }
+    }
+    updateVisibility();
+    setBusy(false);
+  }
+  async function stopCollection() {
+    setBusy(true, "stop");
+    setMessage(targetError, "");
+    state.collecting = false;
+    updateVisibility();
+    await persist({ keepDomain: true });
+    await messageTabs({ type: MSG.RECONFIGURE, force: true });
+    setBusy(false);
+  }
+  startButton.addEventListener("click", () => {
+    if (state.collecting) {
+      stopCollection();
+      return;
+    }
+    captureForm();
+    editVersion += 1;
+    setMessage(targetError, "");
+    if (!state.connected) {
+      setMessage(targetError, "Connect to LaunchDarkly before starting.");
+      return;
+    }
+    if (!state.clientSideId) {
+      setMessage(targetError, "Enter a client ID before starting.");
+      return;
+    }
+    if (!state.observability && !state.sessionReplay) {
+      setMessage(targetError, "Turn on Observability or Session replay before starting.");
+      return;
+    }
+    const domain = normalizeDomain(state.targetDomain);
+    if (!domain || !isValidHostname(domain)) {
+      setMessage(domainError, domain ? "Enter a hostname such as launchdarkly.com." : "Target domain is required.");
+      return;
+    }
+    state.targetDomain = domain;
+    targetDomainInput.value = domain;
+    domainPermissionPending = true;
+    const permissionPromise = chrome.permissions.request({ origins: permissionOrigins(domain) }).catch(() => false);
+    startCollection(permissionPromise).finally(() => {
+      domainPermissionPending = false;
+    });
+  });
   userKeyInput.addEventListener("input", () => {
     state.userKey = userKeyInput.value;
     editVersion += 1;
@@ -1547,14 +1814,25 @@
   });
   clientIdInput.addEventListener("input", () => {
     if (applyingClientId) return;
-    const value = clientIdInput.value.trim();
-    if (findEnvironmentByClientId(state.projects, value)) lookupClientId().catch(() => {
-    });
-    else setMessage(clientIdError, "");
+    if (state.collecting) {
+      clientIdInput.value = state.clientSideId;
+      return;
+    }
+    setClientIdInvalid(false);
+    setMessage(clientIdError, "");
+    updateVisibility();
   });
-  clientIdInput.addEventListener("change", () => {
-    if (applyingClientId) return;
+  confirmClientIdButton.addEventListener("click", () => {
+    if (state.collecting) return;
     lookupClientId({ reportMiss: true }).catch(() => {
+    });
+  });
+  refreshDivsButton.addEventListener("click", () => {
+    if (state.busy) return;
+    const token = ++clientLookup;
+    refreshDivsButton.disabled = true;
+    loadOwnedFlags(token).finally(() => {
+      refreshDivsButton.disabled = state.busy;
     });
   });
   addButton.addEventListener("click", () => {
@@ -1614,6 +1892,7 @@
     }
     paintRowErrors();
     renderSummary(executed.summary);
+    await writeDivSnapshot(state.divs);
     await reinstrumentPage();
   });
   async function reinstrumentPage() {
@@ -1628,9 +1907,9 @@
     if (state.connected || state.busy) return;
     const choice = await openModal({
       title: "Clear settings?",
-      body: "Keep API key and client SDK key keeps those two. Clear all removes everything.",
+      body: "Keep API key and client ID keeps those two. Clear all removes everything.",
       confirmLabel: "Clear settings all",
-      keepLabel: "Clear settings, keep API key and client SDK key",
+      keepLabel: "Clear settings, keep API key and client ID",
       danger: true
     });
     if (!choice || state.connected) return;
@@ -1645,7 +1924,7 @@
     } : { apiKey: "" };
     editVersion += 1;
     clearTimeout(persistTimer);
-    Object.assign(state, defaultSettings(), kept, { persistedDomain: "" });
+    Object.assign(state, defaultSettings(), kept, { persistedDomain: "", anonymousKeyDomain: "" });
     apiKeyInput.value = state.apiKey;
     customerNameInput.value = "";
     targetDomainInput.value = "";
@@ -1669,7 +1948,8 @@
     for (const key of Object.keys(serverRowErrors)) delete serverRowErrors[key];
     await writeExtensionApiKey(state.apiKey);
     await chrome.storage.local.set({ [SETTINGS_KEY]: settingsFromState() });
-    await chrome.storage.local.remove([CONTEXT_DELIVERY_KEY, LAST_SYNC_KEY, SDK_STATUS_KEY, REGISTRATION_KEY]);
+    await chrome.storage.local.remove([CONTEXT_DELIVERY_KEY, LAST_SYNC_KEY, SDK_STATUS_KEY, REGISTRATION_KEY, DIV_SNAPSHOT_KEY, ANON_DOMAIN_KEY]);
+    savedDivs = [];
     await retireDomain(previousDomain, "");
     await messageEveryTab({ type: MSG.SHUTDOWN });
   });
@@ -1696,13 +1976,19 @@
     state.projectKey = config.projectKey;
     state.environmentKey = config.environmentKey;
     state.anonymous = config.anonymous;
+    state.observability = config.observability;
+    state.sessionReplay = config.sessionReplay;
+    state.collecting = false;
     state.userKey = config.userKey;
     state.attributes = config.attributes;
     state.divs = config.divs;
+    await writeDivSnapshot(state.divs);
     apiKeyInput.value = config.apiKey;
     customerNameInput.value = config.customerName;
     targetDomainInput.value = config.targetDomain;
     anonymousInput.checked = config.anonymous;
+    observabilityInput.checked = config.observability;
+    sessionReplayInput.checked = config.sessionReplay;
     userKeyInput.value = config.userKey;
     renderAttributeList();
     renderDivList();
@@ -1738,6 +2024,9 @@
     state.clientSideId = settings.clientSideId;
     state.projects = settings.projects;
     state.anonymous = settings.anonymous;
+    state.observability = settings.observability;
+    state.sessionReplay = settings.sessionReplay;
+    state.collecting = Boolean(settings.connected && settings.collecting);
     state.userKey = settings.userKey;
     state.attributes = settings.attributes;
     state.divs = settings.divs;
@@ -1747,6 +2036,8 @@
     customerNameInput.value = settings.customerName;
     targetDomainInput.value = settings.targetDomain;
     anonymousInput.checked = settings.anonymous;
+    observabilityInput.checked = settings.observability;
+    sessionReplayInput.checked = settings.sessionReplay;
     userKeyInput.value = settings.userKey;
     renderAttributeList();
     renderDivList();
@@ -1776,18 +2067,28 @@
     const stored = await chrome.storage.local.get([
       SETTINGS_KEY,
       ANON_KEY,
+      ANON_DOMAIN_KEY,
       SDK_STATUS_KEY,
       LAST_SYNC_KEY,
       REGISTRATION_KEY,
-      CONTEXT_DELIVERY_KEY
+      CONTEXT_DELIVERY_KEY,
+      DIV_SNAPSHOT_KEY
     ]);
     state.apiKey = await readExtensionApiKey();
     apiKeyInput.value = state.apiKey;
     state.anonymousUserKey = typeof stored[ANON_KEY] === "string" && stored[ANON_KEY] ? stored[ANON_KEY] : createUuid();
-    if (stored[ANON_KEY] !== state.anonymousUserKey) {
-      await chrome.storage.local.set({ [ANON_KEY]: state.anonymousUserKey });
+    state.anonymousKeyDomain = normalizeDomain(typeof stored[ANON_DOMAIN_KEY] === "string" ? stored[ANON_DOMAIN_KEY] : "");
+    const storedDomain = normalizeDomain(cleanSettings(stored[SETTINGS_KEY] || {}).targetDomain);
+    if (!state.anonymousKeyDomain && storedDomain) state.anonymousKeyDomain = storedDomain;
+    if (stored[ANON_KEY] !== state.anonymousUserKey || stored[ANON_DOMAIN_KEY] !== state.anonymousKeyDomain) {
+      await chrome.storage.local.set({
+        [ANON_KEY]: state.anonymousUserKey,
+        [ANON_DOMAIN_KEY]: state.anonymousKeyDomain
+      });
     }
     applyStoredSettings(cleanSettings(stored[SETTINGS_KEY] || {}));
+    savedDivs = Array.isArray(stored[DIV_SNAPSHOT_KEY]) ? cloneDivs(stored[DIV_SNAPSHOT_KEY]) : cloneDivs(state.divs);
+    if (!Array.isArray(stored[DIV_SNAPSHOT_KEY])) await writeDivSnapshot(savedDivs);
     if (stored[SDK_STATUS_KEY]?.message && !stored[SDK_STATUS_KEY]?.ok) setMessage(sdkStatus, stored[SDK_STATUS_KEY].message);
     if (stored[REGISTRATION_KEY]?.error) setMessage(domainError, stored[REGISTRATION_KEY].error);
     if (stored[LAST_SYNC_KEY]?.line) renderSummary(stored[LAST_SYNC_KEY]);

@@ -87,7 +87,8 @@ await esbuild.build({
   entryPoints: {
     background: join(root, 'src/background.js'),
     popup: join(root, 'src/popup.js'),
-    content: join(root, 'src/content.js')
+    content: join(root, 'src/content.js'),
+    telemetry: join(root, 'src/telemetry.js')
   },
   bundle: true,
   outdir: dist,
@@ -118,10 +119,12 @@ try {
   // The license file is included when the SDK package is installed.
 }
 
-const content = await readFile(join(dist, 'content.js'), 'utf8');
-if (content.includes('app.launchdarkly.com')) {
-  throw new Error('The content script bundle references the LaunchDarkly REST API host.');
-}
-if (content.includes("apiKey")) {
-  throw new Error('The content script bundle references apiKey.');
+for (const fileName of ['content.js', 'telemetry.js']) {
+  const bundled = await readFile(join(dist, fileName), 'utf8');
+  if (bundled.includes('https://app.launchdarkly.com/api')) {
+    throw new Error(`${fileName} references the LaunchDarkly REST API.`);
+  }
+  if (bundled.includes('darklaunching-private') || bundled.includes('writeExtensionApiKey')) {
+    throw new Error(`${fileName} references the API key store.`);
+  }
 }

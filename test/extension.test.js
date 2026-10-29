@@ -1,15 +1,16 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
-import { buildExportPayload, cleanSettings, parseImportedConfig, preserveDivs, preserveText, validateConnectionInput, validateUserContext } from '../src/lib/config.js';
+import { buildExportPayload, cleanSettings, parseImportedConfig, preserveDivs, preserveText, validateApiKey, validateConnectionInput, validateUserContext } from '../src/lib/config.js';
 import { buildContext, countryFromLocale, detectOsBrowser, parseCloudflareLoc, resolveCountry, sameEvaluationContext, validateContextAttributes } from '../src/lib/context.js';
 import { applyFlagToElement, applyMappings, createMemory, findElements, isValidCssSelector } from '../src/lib/dom.js';
 import { hostMatchesTarget, normalizeDomain, permissionOrigins, toolbarIconColored } from '../src/lib/domain.js';
-import { contextEventBatch, isClientSideId, isLaunchDarklyEventsUrl } from '../src/lib/events.js';
+import { contextEventBatch, isClientSideId, isLaunchDarklyEventsUrl, isLaunchDarklyTelemetryUrl } from '../src/lib/events.js';
 import { createFlagBody, customerTag, offVariationValue, planSync, rowsFromOwnedFlags } from '../src/lib/flags.js';
-import { LdError, ldRequest, listAllFlags, listProjects, parseRetryAfter } from '../src/lib/api.js';
-import { filterProjects, findEnvironmentByClientId, normalizeProjectPayload } from '../src/lib/projects.js';
+import { LD_API_VERSION, LdError, ldRequest, listAllFlags, listProjects, parseRetryAfter } from '../src/lib/api.js';
+import { clientEnvironmentReady, filterProjects, findEnvironmentByClientId, normalizeProjectPayload } from '../src/lib/projects.js';
 import { executeSync, summarizeResults } from '../src/lib/sync.js';
+import { anonymousKeyForDomain } from '../src/lib/uuid.js';
 
 function response({ status = 200, body = {}, headers = {} } = {}) {
   const normalized = Object.fromEntries(Object.entries(headers).map(([key, value]) => [key.toLowerCase(), value]));
@@ -26,6 +27,33 @@ function response({ status = 200, body = {}, headers = {} } = {}) {
     body: { async cancel() {} }
   };
 }
+
+test('mints a new anonymous user for each target domain', () => {
+  const same = anonymousKeyForDomain({
+    anonymous: true,
+    key: 'user-a',
+    keyDomain: 'example.com',
+    domain: 'example.com',
+    uuid: () => 'user-b'
+  });
+  assert.deepEqual(same, { key: 'user-a', domain: 'example.com' });
+  const changed = anonymousKeyForDomain({
+    anonymous: true,
+    key: 'user-a',
+    keyDomain: 'example.com',
+    domain: 'coupang.com',
+    uuid: () => 'user-b'
+  });
+  assert.deepEqual(changed, { key: 'user-b', domain: 'coupang.com' });
+  const named = anonymousKeyForDomain({
+    anonymous: false,
+    key: 'user-a',
+    keyDomain: 'example.com',
+    domain: 'coupang.com',
+    uuid: () => 'user-b'
+  });
+  assert.deepEqual(named, { key: 'user-a', domain: 'example.com' });
+});
 
 test('normalizes domains and matches only real subdomains', () => {
   assert.equal(normalizeDomain('https://www.LaunchDarkly.com:443/pricing?q=1'), 'launchdarkly.com');
@@ -160,6 +188,8 @@ test('imports and exports configuration without detected attributes', () => {
     environmentKey: 'production',
     anonymous: false,
     userKey: 'jane.doe@acme.com',
+    observability: false,
+    sessionReplay: true,
     os: 'macOS',
     browser: 'Chrome 126',
     country: 'Singapore',
@@ -167,7 +197,9 @@ test('imports and exports configuration without detected attributes', () => {
     attributes: [{ id: 'attr-1', key: 'plan', value: 'gold' }],
     divs: [{ name: 'sidebar-banner', selector: '#sidebar-banner', defaultState: false, whenFalse: 'show' }]
   });
-  assert.deepEqual(Object.keys(payload).sort(), ['apiKey', 'customerName', 'divs', 'environmentKey', 'projectKey', 'targetDomain', 'userContext']);
+  assert.deepEqual(Object.keys(payload).sort(), ['apiKey', 'customerName', 'divs', 'environmentKey', 'observability', 'projectKey', 'sessionReplay', 'targetDomain', 'userContext']);
+  assert.equal(payload.observability, false);
+  assert.equal(payload.sessionReplay, true);
   assert.equal(payload.targetDomain, 'example.com');
   assert.equal(payload.divs[0].defaultState, false);
   assert.equal(payload.divs[0].selector, '#sidebar-banner');
@@ -200,10 +232,19 @@ test('imports and exports configuration without detected attributes', () => {
   assert.equal(withAttributes.attributes[0].key, 'plan');
   assert.equal(withAttributes.attributes[0].value, 'gold');
   assert.equal(withAttributes.attributes[0].id, 'row-1');
+  assert.equal(withAttributes.observability, false);
+  assert.equal(withAttributes.sessionReplay, true);
+  assert.equal(cleanSettings({}).observability, false);
+  assert.equal(cleanSettings({}).sessionReplay, false);
+  assert.equal(cleanSettings({}).collecting, false);
+  assert.equal(cleanSettings({ collecting: true }).collecting, true);
+  assert.throws(() => parseImportedConfig({ ...payload, observability: 'yes' }), /observability must be a boolean/);
   const settings = cleanSettings({ ...imported, apiKey: 'api-123', projects: [{ key: 'default', environments: [{ key: 'production', clientSideId: 'c', apiKey: 'sdk-secret' }] }] });
   assert.equal(settings.apiKey, undefined);
   assert.equal(JSON.stringify(settings).includes('sdk-secret'), false);
   assert.equal(validateConnectionInput({ apiKey: '', customerName: '!!!', targetDomain: '' }).ok, false);
+  assert.equal(validateApiKey('').ok, false);
+  assert.equal(validateApiKey('api-123').ok, true);
   assert.equal(validateUserContext({ anonymous: true, userKey: '' }).ok, true);
   assert.equal(validateUserContext({ anonymous: false, userKey: ' ' }).ok, false);
 });
@@ -276,6 +317,7 @@ test('builds a customer tag LaunchDarkly will accept', () => {
   const body = createFlagBody('coupang', { name: 'Travel logo', selector: '#header > a > img', defaultState: true });
   assert.equal(body.name, 'coupang - Travel logo');
   assert.equal(body.key, 'coupang-travel-logo');
+  assert.equal(body.description, '#header > a > img');
   assert.deepEqual(body.tags, ['darklaunching', 'Coupang']);
   assert.equal(body.name.includes('header'), false);
   const plan = planSync({
@@ -297,6 +339,7 @@ test('builds a customer tag LaunchDarkly will accept', () => {
   }, 'production'), false);
   assert.equal(plan.updates[0].addTag, 'Coupang');
   assert.deepEqual(plan.updates[0].removeTags, ['customer.coupang']);
+  assert.equal(plan.updates[0].description, '#header > a > img');
   assert.equal(plan.updates[0].variationId, undefined);
 });
 
@@ -317,6 +360,11 @@ test('filters projects by name or key', () => {
   assert.equal(located.project.key, 'demo');
   assert.equal(located.environment.key, 'test');
   assert.equal(findEnvironmentByClientId([{ key: 'demo', environments: [] }], 'missing'), null);
+  const readyProjects = [{ key: 'demo', environments: [{ key: 'production', clientSideId: 'sdk-prod' }] }];
+  assert.equal(clientEnvironmentReady({ connected: true, projects: readyProjects, clientSideId: 'sdk-prod', projectKey: 'demo', environmentKey: 'production' }), true);
+  assert.equal(clientEnvironmentReady({ connected: false, projects: readyProjects, clientSideId: 'sdk-prod', projectKey: 'demo', environmentKey: 'production' }), false);
+  assert.equal(clientEnvironmentReady({ connected: true, projects: readyProjects, clientSideId: 'missing', projectKey: 'demo', environmentKey: 'production' }), false);
+  assert.equal(clientEnvironmentReady({ connected: true, projects: readyProjects, clientSideId: 'sdk-prod', projectKey: 'other', environmentKey: 'production' }), false);
   const rows = rowsFromOwnedFlags({
     flags: [
       {
@@ -327,17 +375,39 @@ test('filters projects by name or key', () => {
         variations: [{ value: true }, { value: false }],
         environments: { development: { offVariation: 1 } }
       },
+      {
+        key: 'coupang-nav',
+        name: 'coupang - Nav',
+        description: '.nav > a',
+        tags: ['darklaunching', 'Coupang'],
+        variations: [{ value: true }, { value: false }],
+        environments: { development: { offVariation: 1 } }
+      },
+      {
+        key: 'coupang-footer',
+        name: 'coupang - Footer',
+        description: '',
+        tags: ['darklaunching', 'Coupang'],
+        variations: [{ value: true }, { value: false }],
+        environments: { development: { offVariation: 1 } }
+      },
       { key: 'other-flag', name: 'Other', tags: ['beta'], variations: [{ value: true }, { value: false }] }
     ],
     customerName: 'coupang',
     environmentKey: 'development',
-    existingDivs: [{ id: 'manual', name: 'Manual row', selector: '.manual', defaultState: true, whenFalse: 'show' }],
+    existingDivs: [
+      { id: 'manual', name: 'Manual row', selector: '.manual', defaultState: true, whenFalse: 'show' },
+      { id: 'nav', name: 'Nav', selector: '.stale', defaultState: true, whenFalse: 'hide' },
+      { id: 'footer', name: 'Footer', selector: 'footer', defaultState: false, whenFalse: 'hide' }
+    ],
     uuid: () => 'loaded'
   });
   assert.equal(rows[0].name, 'Travel logo');
   assert.equal(rows[0].selector, '#header > a > img');
   assert.equal(rows[0].defaultState, false);
-  assert.equal(rows[1].id, 'manual');
+  assert.equal(rows[1].selector, '.nav > a');
+  assert.equal(rows[2].selector, 'footer');
+  assert.equal(rows[3].id, 'manual');
 });
 
 test('keeps the API key on the LaunchDarkly host and retries rate limits', async () => {
@@ -349,14 +419,17 @@ test('keeps the API key on the LaunchDarkly host and retries rate limits', async
   assert.equal(called, false);
 
   let auth = '';
+  let apiVersion = '';
   await ldRequest('/api/v2/projects?limit=1', {
     apiKey: 'api-123',
     fetchImpl: async (_url, init) => {
       auth = init.headers.Authorization;
+      apiVersion = init.headers['LD-API-Version'];
       return response({ body: { items: [] } });
     }
   });
   assert.equal(auth, 'api-123');
+  assert.equal(apiVersion, LD_API_VERSION);
   assert.equal(parseRetryAfter('2'), 2000);
 
   let attempts = 0;
@@ -455,7 +528,12 @@ test('continues flag sync when one request fails', async () => {
   assert.equal(patch.headers['Content-Type'], 'application/json; domain-model=launchdarkly.semanticpatch');
   assert.equal(patch.body.instructions[0].kind, 'updateOffVariation');
   assert.equal(patch.body.instructions[0].variationId, 'false-id');
+  const described = calls.find((call) => call.body?.instructions?.some((item) => item.kind === 'updateDescription'));
+  assert.equal(described.body.instructions[0].value, '#checkout');
+  const created = calls.find((call) => call.method === 'POST');
+  assert.equal(created.body.description, '#new-banner');
   assert.equal(calls.every((call) => call.headers.Authorization === 'api-123'), true);
+  assert.equal(calls.every((call) => call.headers['LD-API-Version'] === '20240415'), true);
   const summary = summarizeResults(results);
   assert.match(summary.line, /Created 1, updated 1, deleted 1, skipped 1, failed 1/);
 });
@@ -529,12 +607,21 @@ test('relays LaunchDarkly analytics only to the events host', () => {
   assert.equal(isLaunchDarklyEventsUrl('http://events.launchdarkly.com/events/bulk/client-id'), false);
   assert.equal(isLaunchDarklyEventsUrl('https://clientsdk.launchdarkly.com/sdk/evalx/client-id/contexts/abc'), false);
   assert.equal(isLaunchDarklyEventsUrl('https://app.launchdarkly.com/api/v2/flags'), false);
+  assert.equal(isLaunchDarklyTelemetryUrl('https://clientsdk.launchdarkly.com/sdk/evalx/client-id/contexts/abc'), true);
+  assert.equal(isLaunchDarklyTelemetryUrl('https://pub.observability.app.launchdarkly.com'), true);
+  assert.equal(isLaunchDarklyTelemetryUrl('https://otel.observability.app.launchdarkly.com/v1/traces'), true);
+  assert.equal(isLaunchDarklyTelemetryUrl('https://app.launchdarkly.com/api/v2/flags'), false);
+  assert.equal(isLaunchDarklyTelemetryUrl('https://user:pass@otel.observability.app.launchdarkly.com/v1/traces'), false);
 });
 
 test('content script source does not read the API key or geolocation', async () => {
   const source = await readFile(new URL('../src/content.js', import.meta.url), 'utf8');
+  const telemetry = await readFile(new URL('../src/telemetry.js', import.meta.url), 'utf8');
   const context = await readFile(new URL('../src/lib/context.js', import.meta.url), 'utf8');
   assert.equal(source.includes('apiKey'), false);
+  assert.equal(telemetry.includes('apiKey'), false);
+  assert.equal(telemetry.includes('secret.js'), false);
+  assert.equal(telemetry.includes('app.launchdarkly.com'), false);
   assert.equal(source.includes('secret.js'), false);
   assert.equal(source.includes('storage.session'), false);
   assert.equal(source.includes('app.launchdarkly.com'), false);

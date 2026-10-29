@@ -4128,6 +4128,9 @@
       projects: [],
       anonymous: true,
       userKey: "",
+      observability: false,
+      sessionReplay: false,
+      collecting: false,
       attributes: [],
       divs: [],
       connected: false,
@@ -4176,6 +4179,9 @@
       projects: normalizeStoredProjects(merged.projects),
       anonymous: Boolean(merged.anonymous),
       userKey: String(merged.userKey ?? ""),
+      observability: Boolean(merged.observability),
+      sessionReplay: Boolean(merged.sessionReplay),
+      collecting: Boolean(merged.collecting),
       attributes: normalizeStoredAttributes(merged.attributes, uuid),
       divs: Array.isArray(merged.divs) ? merged.divs.map((div) => normalizeStoredDiv(div, uuid)) : [],
       connected: Boolean(merged.connected),
@@ -4258,10 +4264,25 @@
   }
 
   // src/lib/events.js
+  var TELEMETRY_HOSTS = /* @__PURE__ */ new Set([
+    "events.launchdarkly.com",
+    "clientsdk.launchdarkly.com",
+    "clientstream.launchdarkly.com",
+    "pub.observability.app.launchdarkly.com",
+    "otel.observability.app.launchdarkly.com",
+    "pub.observability.app.eu.launchdarkly.com",
+    "otel.observability.app.eu.launchdarkly.com"
+  ]);
   function isLaunchDarklyEventsUrl(value) {
+    return isLaunchDarklyHost(value, /* @__PURE__ */ new Set(["events.launchdarkly.com"]));
+  }
+  function isLaunchDarklyTelemetryUrl(value) {
+    return isLaunchDarklyHost(value, TELEMETRY_HOSTS);
+  }
+  function isLaunchDarklyHost(value, hosts) {
     try {
       const url = new URL(value);
-      return url.protocol === "https:" && url.hostname === "events.launchdarkly.com" && url.username === "" && url.password === "";
+      return url.protocol === "https:" && hosts.has(url.hostname) && url.username === "" && url.password === "";
     } catch {
       return false;
     }
@@ -4318,12 +4339,54 @@
   var applyQueued = false;
   var flushTimer = 0;
   var lastEvaluations = [];
+  var clientReady = false;
+  var needsEvaluation = true;
+  var evaluationCache = /* @__PURE__ */ new Map();
+  var TELEMETRY_SOURCE = "darklaunching-telemetry";
+  var TELEMETRY_REQUEST = "darklaunching-telemetry-request";
+  var TELEMETRY_RESPONSE = "darklaunching-telemetry-response";
   var nativeFetch = globalThis.fetch.bind(globalThis);
-  globalThis.fetch = (input, init) => {
+  globalThis.fetch = async (input, init) => {
     const url = requestUrl(input);
-    if (!isLaunchDarklyEventsUrl(url)) return nativeFetch(input, init);
-    return relayEvents(url, init);
+    if (!isLaunchDarklyTelemetryUrl(url)) return nativeFetch(input, init);
+    const method = String(init?.method || (input instanceof Request ? input.method : "GET")).toUpperCase();
+    if (method !== "POST") return nativeFetch(input, init);
+    const headers = init?.headers || (input instanceof Request ? input.headers : void 0);
+    const body = init?.body !== void 0 ? init.body : input instanceof Request ? await input.clone().arrayBuffer() : void 0;
+    return relayEvents(url, { method, headers, body });
   };
+  window.addEventListener("message", (event) => {
+    if (event.source !== window || event.data?.source !== TELEMETRY_REQUEST) return;
+    const request = event.data;
+    const body = request.encoding === "base64" ? base64ToBytes(request.body) : request.body;
+    relayEvents(request.url, { method: request.method || "POST", headers: request.headers, body }).then(async (response) => {
+      window.postMessage({
+        source: TELEMETRY_RESPONSE,
+        id: request.id,
+        ok: true,
+        status: response.status,
+        body: await response.text()
+      }, "*");
+    }).catch((error) => {
+      window.postMessage({
+        source: TELEMETRY_RESPONSE,
+        id: request.id,
+        ok: false,
+        error: error?.message || "LaunchDarkly did not receive the telemetry."
+      }, "*");
+    });
+  });
+  if (typeof navigator.sendBeacon === "function") {
+    const nativeBeacon = navigator.sendBeacon.bind(navigator);
+    navigator.sendBeacon = (url, data) => {
+      const target = String(url || "");
+      if (!isLaunchDarklyTelemetryUrl(target)) return nativeBeacon(url, data);
+      const contentType = data instanceof Blob && data.type ? data.type : "text/plain;charset=UTF-8";
+      relayEvents(target, { method: "POST", headers: { "content-type": contentType }, body: data }).catch(() => {
+      });
+      return true;
+    };
+  }
   function requestUrl(input) {
     if (typeof input === "string") return input;
     if (input instanceof URL) return input.href;
@@ -4338,7 +4401,34 @@
     });
     return record;
   }
+  function base64ToBytes(value) {
+    const binary = atob(String(value || ""));
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+    return bytes;
+  }
+  function bytesToBase64(bytes) {
+    let binary = "";
+    const chunk = 32768;
+    for (let index = 0; index < bytes.length; index += chunk) {
+      binary += String.fromCharCode(...bytes.subarray(index, index + chunk));
+    }
+    return btoa(binary);
+  }
+  async function encodeBody(body) {
+    if (body == null || body === "") return { encoding: "text", body: "" };
+    if (typeof body === "string") return { encoding: "text", body };
+    if (body instanceof URLSearchParams) return { encoding: "text", body: body.toString() };
+    let bytes;
+    if (body instanceof Blob) bytes = new Uint8Array(await body.arrayBuffer());
+    else if (body instanceof ArrayBuffer) bytes = new Uint8Array(body);
+    else if (ArrayBuffer.isView(body)) bytes = new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+    else if (typeof body.getReader === "function") bytes = new Uint8Array(await new Response(body).arrayBuffer());
+    else return { encoding: "text", body: "" };
+    return { encoding: "base64", body: bytesToBase64(bytes) };
+  }
   async function relayEvents(url, init = {}) {
+    const encoded = await encodeBody(init.body);
     let response;
     try {
       response = await chrome.runtime.sendMessage({
@@ -4346,7 +4436,8 @@
         url,
         method: init.method || "POST",
         headers: headerRecord(init.headers),
-        body: typeof init.body === "string" ? init.body : ""
+        encoding: encoded.encoding,
+        body: encoded.body
       });
     } catch (error) {
       throw new Error(error?.message || "Could not send the user context to LaunchDarkly.");
@@ -4356,7 +4447,7 @@
     if (!Number.isInteger(status) || status < 200 || status > 599) {
       throw new Error("LaunchDarkly did not receive the user context.");
     }
-    if (status > 204) writeSdkStatus(false, "LaunchDarkly did not receive the user context.");
+    if (status > 204 && isLaunchDarklyEventsUrl(url)) writeSdkStatus(false, "LaunchDarkly did not receive the user context.");
     const date = response.headers?.date || response.headers?.Date;
     return new Response(response.body ?? "", { status, headers: date ? { date } : {} });
   }
@@ -4396,33 +4487,55 @@
       }
     });
   }
+  function invalidateEvaluations() {
+    needsEvaluation = true;
+  }
   function applyFlags() {
     if (!client) return;
+    const evaluate = needsEvaluation && clientReady;
+    if (evaluate) needsEvaluation = false;
     const mappings = [];
     const evaluations = [];
+    const seen = /* @__PURE__ */ new Set();
+    let counted = false;
     for (const div of settings.divs) {
       const name = String(div.name ?? "").trim();
       const selector = String(div.selector ?? "").trim();
       if (!name || !selector) continue;
       const identity = flagIdentity(settings.customerName, name);
       if (!identity.key) continue;
+      seen.add(identity.key);
       const fallback = div.whenFalse === "show" ? false : true;
-      const detail = client.variationDetail(identity.key, fallback);
+      let cached = evaluationCache.get(identity.key);
+      if (clientReady && (evaluate || !cached || cached.default !== fallback)) {
+        const detail = client.variationDetail(identity.key, fallback);
+        cached = {
+          value: detail?.value,
+          default: fallback,
+          variation: detail?.variationIndex
+        };
+        evaluationCache.set(identity.key, cached);
+        counted = true;
+      }
+      const value = cached ? cached.value : fallback;
       evaluations.push({
         key: identity.key,
-        value: detail?.value,
+        value,
         default: fallback,
-        variation: detail?.variationIndex
+        variation: cached?.variation
       });
       mappings.push({
         elements: findElements(document, selector),
         action: div.whenFalse,
-        value: detail?.value
+        value
       });
+    }
+    for (const key of evaluationCache.keys()) {
+      if (!seen.has(key)) evaluationCache.delete(key);
     }
     lastEvaluations = evaluations;
     applyMappings(mappings, memory);
-    scheduleFlush();
+    if (counted) scheduleFlush();
   }
   function ensureObserver() {
     if (observer || !document.documentElement) return;
@@ -4452,11 +4565,26 @@
       await writeSdkStatus(false, "LaunchDarkly did not receive the user context.");
     }
   }
+  function publishTelemetry(active) {
+    window.postMessage({
+      source: TELEMETRY_SOURCE,
+      active: active === true,
+      clientSideId: active ? activeClientId : "",
+      context: active ? activeContext : null,
+      observability: settings.collecting === true && settings.observability === true,
+      sessionReplay: settings.collecting === true && settings.sessionReplay === true,
+      targetDomain: settings.targetDomain || location.hostname
+    }, "*");
+  }
   async function stopClient() {
     clearTimeout(flushTimer);
     const current = client;
     client = null;
     activeClientId = "";
+    clientReady = false;
+    needsEvaluation = true;
+    evaluationCache.clear();
+    publishTelemetry(false);
     if (!current) return;
     try {
       await current.flush();
@@ -4473,8 +4601,7 @@
       const result = await chrome.runtime.sendMessage({
         type: MSG.PUBLISH_CONTEXT,
         clientSideId,
-        context,
-        evaluations: lastEvaluations
+        context
       });
       delivery = result?.ok ? { ok: true, key: result.key, anonymous: Boolean(result.anonymous), at: result.at || Date.now() } : { ok: false, error: result?.error || "LaunchDarkly did not receive the user context.", at: Date.now() };
     } catch (error) {
@@ -4507,8 +4634,14 @@
     client = ld;
     activeClientId = clientSideId;
     activeContext = context;
-    ld.on("change", () => scheduleApply());
+    publishTelemetry(true);
+    ld.on("change", () => {
+      invalidateEvaluations();
+      scheduleApply();
+    });
     ld.on("initialized", () => {
+      clientReady = true;
+      invalidateEvaluations();
       writeSdkStatus(true, "");
       scheduleApply();
     });
@@ -4519,8 +4652,10 @@
     } else if (result?.status !== "complete") {
       await writeSdkStatus(false, "LaunchDarkly client is still connecting. Flag changes will apply when it does.");
     } else {
+      clientReady = true;
       await writeSdkStatus(true, "");
     }
+    if (client === ld) publishTelemetry(true);
     try {
       applyFlags();
     } catch {
@@ -4580,11 +4715,14 @@
     ensureObserver();
     if (!force && client && activeClientId === settings.clientSideId && sameContext(activeContext, context)) {
       scheduleApply();
+      publishTelemetry(true);
       return;
     }
     if (!force && client && activeClientId === settings.clientSideId) {
       activeContext = context;
       await client.identify(context, { timeout: 5 });
+      invalidateEvaluations();
+      publishTelemetry(true);
       try {
         applyFlags();
       } catch {
@@ -4612,6 +4750,8 @@
     }
     activeContext = context;
     await client.identify(context, { timeout: 5 });
+    invalidateEvaluations();
+    publishTelemetry(true);
     try {
       applyFlags();
     } catch {

@@ -73,8 +73,9 @@ export function divNameFromFlag(flag, customerName) {
 
 function selectorFromDescription(description) {
   const value = String(description ?? '').trim();
-  if (!value || !/[#.\[>:~+]/.test(value)) return '';
-  return isValidCssSelector(value) ? value : '';
+  if (!value || !isValidCssSelector(value)) return '';
+  if (/\s/.test(value) && !/[#.\[>:~+]/.test(value)) return '';
+  return value;
 }
 
 export function ownedFlagSummary(flag, environmentKey) {
@@ -113,10 +114,11 @@ export function rowsFromOwnedFlags({ flags, customerName, environmentKey, existi
     const previous = existingByKey.get(flag.key) || existingByKey.get(flagIdentity(customer, name).key);
     if (previous?.id) usedIds.add(previous.id);
     const off = offVariationValue(flag, environmentKey);
+    const described = selectorFromDescription(flag.description);
     return {
       id: previous?.id || uuid(),
       name,
-      selector: String(previous?.selector || selectorFromDescription(flag.description) || ''),
+      selector: described || String(previous?.selector || ''),
       defaultState: typeof off === 'boolean' ? off : false,
       whenFalse: previous?.whenFalse === 'show' ? 'show' : 'hide'
     };
@@ -147,6 +149,7 @@ export function createFlagBody(customerName, div) {
     tags: [OWNERSHIP_TAG, customerTag(customerName)].filter(Boolean),
     variations: [{ value: true }, { value: false }],
     defaults: { offVariation, onVariation: offVariation === 0 ? 1 : 0 },
+    description: String(div?.selector ?? '').trim(),
     clientSideAvailability: { usingEnvironmentId: true, usingMobileKey: false }
   };
 }
@@ -234,6 +237,8 @@ export function planSync({ divs, flags, customerName, environmentKey }) {
       continue;
     }
     const tagChange = customerTagChange(remote, customerName);
+    const description = String(item.div.selector || '').trim();
+    const descriptionChanged = String(remote.description || '') !== description;
     const current = offVariationValue(remote, environmentKey);
     if (current === undefined) {
       failures.push({
@@ -245,7 +250,7 @@ export function planSync({ divs, flags, customerName, environmentKey }) {
       continue;
     }
     const variationChanged = current !== item.div.defaultState;
-    if (!variationChanged && !tagChange) continue;
+    if (!variationChanged && !tagChange && !descriptionChanged) continue;
     let variationId = '';
     if (variationChanged) {
       variationId = variationIdForValue(remote, item.div.defaultState);
@@ -259,7 +264,12 @@ export function planSync({ divs, flags, customerName, environmentKey }) {
         continue;
       }
     }
-    updates.push({ ...item, ...(variationId ? { variationId } : {}), ...(tagChange || {}) });
+    updates.push({
+      ...item,
+      ...(variationId ? { variationId } : {}),
+      ...(tagChange || {}),
+      ...(descriptionChanged ? { description } : {})
+    });
   }
 
   for (const flag of flags || []) {

@@ -1,6 +1,7 @@
 import { normalizeProjectPayload } from './projects.js';
 
 export const LD_API_ORIGIN = 'https://app.launchdarkly.com';
+export const LD_API_VERSION = '20240415';
 const MAX_PAGES = 200;
 const MAX_RETRY_WAIT_MS = 20000;
 
@@ -48,6 +49,7 @@ function buildHeaders({ apiKey, headers, body }) {
   const result = { Authorization: apiKey, Accept: 'application/json' };
   if (body !== undefined) result['Content-Type'] = 'application/json';
   if (headers) Object.assign(result, headers);
+  result['LD-API-Version'] = LD_API_VERSION;
   return result;
 }
 

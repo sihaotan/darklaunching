@@ -5,17 +5,18 @@ import {
   defaultSettings,
   parseImportedConfig,
   preserveText,
+  validateApiKey,
   validateConnectionInput,
   validateUserContext
 } from './lib/config.js';
 import { hostMatchesTarget, isValidHostname, normalizeDomain, permissionOrigins } from './lib/domain.js';
 import { flagIdentity, rowsFromOwnedFlags, validateDivRows } from './lib/flags.js';
 import { sanitizeKey } from './lib/sanitize.js';
-import { ANON_KEY, CONTEXT_DELIVERY_KEY, COUNTRY_CACHE_KEY, LAST_SYNC_KEY, REGISTRATION_KEY, SDK_STATUS_KEY, SETTINGS_KEY } from './lib/keys.js';
-import { findEnvironmentByClientId } from './lib/projects.js';
+import { ANON_DOMAIN_KEY, ANON_KEY, CONTEXT_DELIVERY_KEY, COUNTRY_CACHE_KEY, DIV_SNAPSHOT_KEY, LAST_SYNC_KEY, REGISTRATION_KEY, SDK_STATUS_KEY, SETTINGS_KEY } from './lib/keys.js';
+import { clientEnvironmentReady, findEnvironmentByClientId } from './lib/projects.js';
 import { MSG } from './lib/messages.js';
 import { readExtensionApiKey, writeExtensionApiKey } from './lib/secret.js';
-import { createUuid } from './lib/uuid.js';
+import { anonymousKeyForDomain, createUuid } from './lib/uuid.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -23,21 +24,26 @@ const apiKeyInput = $('api-key');
 const customerNameInput = $('customer-name');
 const targetDomainInput = $('target-domain');
 const anonymousInput = $('anonymous');
+const observabilityInput = $('observability');
+const sessionReplayInput = $('session-replay');
 const userKeyInput = $('user-key');
 const projectName = $('project-name');
 const environmentName = $('environment-name');
 const divList = $('div-list');
 const divEmpty = $('div-empty');
 const connectButton = $('connect');
+const startButton = $('start-target');
 const updateButton = $('update-flags');
 const importButton = $('import-config');
 const clearButton = $('clear-settings');
 const fileInput = $('import-file');
 const exportButton = $('export-config');
 const addButton = $('add-div');
+const refreshDivsButton = $('refresh-divs');
 const statusDot = $('status-dot');
 const siteStatus = $('site-status');
 const clientIdInput = $('client-id-input');
+const confirmClientIdButton = $('confirm-client-id');
 const clientIdStatus = $('client-id-status');
 const clientIdError = $('client-id-error');
 const contextJson = $('context-json');
@@ -51,6 +57,8 @@ const attributeList = $('attribute-list');
 const addAttributeButton = $('add-attribute');
 const updateContextButton = $('update-context');
 const environmentSection = $('environment-section');
+const targetSection = $('target-section');
+const userContextSection = $('user-context-section');
 const flagsSection = $('flags-section');
 const syncResults = $('sync-results');
 const modal = $('modal');
@@ -67,6 +75,7 @@ const customerError = $('customer-error');
 const customerPreview = $('customer-preview');
 const domainError = $('domain-error');
 const connectError = $('connect-error');
+const targetError = $('target-error');
 const notice = $('notice');
 const userKeyError = $('user-key-error');
 const sdkStatus = $('sdk-status');
@@ -75,6 +84,7 @@ const state = {
   ...defaultSettings(),
   apiKey: '',
   anonymousUserKey: '',
+  anonymousKeyDomain: '',
   os: 'Detecting…',
   browser: 'Detecting…',
   country: 'Detecting…',
@@ -84,6 +94,7 @@ const state = {
 
 const serverRowErrors = {};
 let persistTimer = 0;
+let savedDivs = [];
 let applyingClientId = false;
 let loadedClientId = '';
 let clientLookup = 0;
@@ -134,6 +145,9 @@ function settingsFromState() {
     projects: state.projects,
     anonymous: state.anonymous,
     userKey: state.userKey,
+    observability: state.observability,
+    sessionReplay: state.sessionReplay,
+    collecting: state.collecting,
     attributes: state.attributes,
     divs: state.divs,
     connected: state.connected,
@@ -146,15 +160,47 @@ function captureForm({ keepDivs = false, keepDomain = false, keepAttributes = fa
   state.customerName = customerNameInput.value;
   state.targetDomain = keepDomain ? preserveText(state.targetDomain, targetDomainInput.value) : targetDomainInput.value;
   state.anonymous = anonymousInput.checked;
+  state.observability = observabilityInput.checked;
+  state.sessionReplay = sessionReplayInput.checked;
   state.userKey = userKeyInput.value;
   if (!keepDivs) readDivsFromDom();
   if (!keepAttributes) readAttributesFromDom();
 }
 
+let anonymousKeyWrite = Promise.resolve();
+
+async function assignAnonymousKey(domain) {
+  const next = anonymousKeyForDomain({
+    anonymous: state.anonymous,
+    key: state.anonymousUserKey,
+    keyDomain: state.anonymousKeyDomain,
+    domain: normalizeDomain(domain || '')
+  });
+  if (next.key === state.anonymousUserKey && next.domain === state.anonymousKeyDomain) {
+    await anonymousKeyWrite;
+    return;
+  }
+  state.anonymousUserKey = next.key;
+  state.anonymousKeyDomain = next.domain;
+  updateContextPreview();
+  const write = chrome.storage.local.set({
+    [ANON_KEY]: state.anonymousUserKey,
+    [ANON_DOMAIN_KEY]: state.anonymousKeyDomain
+  });
+  anonymousKeyWrite = write;
+  await write;
+}
+
+let persistSerial = 0;
+
 async function persist({ keepDivs = false, keepDomain = false } = {}) {
   captureForm({ keepDivs, keepDomain });
-  await writeExtensionApiKey(state.apiKey);
-  await chrome.storage.local.set({ [SETTINGS_KEY]: settingsFromState() });
+  const serial = ++persistSerial;
+  const settings = settingsFromState();
+  const apiKey = state.apiKey;
+  await writeExtensionApiKey(apiKey);
+  if (serial !== persistSerial) return;
+  await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
 }
 
 function schedulePersist() {
@@ -213,6 +259,9 @@ async function loadOwnedFlags(token) {
   updateVisibility();
   editVersion += 1;
   await persist();
+  await writeDivSnapshot(state.divs);
+  if (token !== clientLookup) return;
+  await reinstrumentPage();
   if (token !== clientLookup) return;
   setMessage(clientIdError, '');
   setMessage(
@@ -224,21 +273,27 @@ async function loadOwnedFlags(token) {
   loadedClientId = state.clientSideId;
 }
 
+function setClientIdInvalid(invalid) {
+  clientIdInput.classList.toggle('is-invalid', invalid);
+}
+
 async function lookupClientId({ reportMiss = false } = {}) {
-  if (applyingClientId || state.busy) return;
+  if (applyingClientId || state.busy || state.collecting) return;
   const token = ++clientLookup;
   const value = clientIdInput.value.trim();
-  if (!value) {
-    setMessage(clientIdError, '');
-    setMessage(clientIdStatus, '');
-    return;
-  }
   const match = findEnvironmentByClientId(state.projects, value);
-  if (!match) {
+  if (!value || !match) {
     setMessage(clientIdStatus, '');
-    if (reportMiss) setMessage(clientIdError, 'No environment uses this client ID.');
+    if (reportMiss) {
+      setClientIdInvalid(true);
+      setMessage(clientIdError, value ? 'No environment uses this client ID.' : 'Enter a client ID.');
+    } else {
+      setMessage(clientIdError, '');
+    }
+    updateVisibility();
     return;
   }
+  setClientIdInvalid(false);
   setMessage(clientIdError, '');
   const changed = match.project.key !== state.projectKey || match.environment.key !== state.environmentKey || state.clientSideId !== match.environment.clientSideId;
   if (changed) {
@@ -255,11 +310,52 @@ async function lookupClientId({ reportMiss = false } = {}) {
   await loadOwnedFlags(token);
 }
 
+function setFieldLocked(input, locked) {
+  input.disabled = locked;
+  const field = input.closest('.field');
+  if (!field) return;
+  field.classList.toggle('is-locked', locked);
+  const icon = field.querySelector('.lock');
+  if (icon) icon.hidden = !locked;
+}
+
+function enteredClientId() {
+  return clientIdInput.value.trim();
+}
+
 function updateVisibility() {
-  environmentSection.hidden = !state.connected;
-  const configured = state.divs.some((div) => String(div.selector || '').trim() || String(div.name || '').trim());
-  flagsSection.hidden = !(configured || (state.connected && state.projectKey && state.environmentKey));
+  const connected = state.connected;
+  const clientSideId = enteredClientId();
+  const clientReady = clientEnvironmentReady({
+    connected,
+    projects: state.projects,
+    clientSideId,
+    projectKey: state.projectKey,
+    environmentKey: state.environmentKey
+  });
+  const collecting = state.collecting;
+  environmentSection.hidden = !connected;
+  targetSection.hidden = !clientReady;
+  userContextSection.hidden = !(clientReady && collecting);
+  if (clientReady) {
+    const match = findEnvironmentByClientId(state.projects, clientSideId);
+    projectName.textContent = match.project.name || match.project.key;
+    environmentName.textContent = match.environment.name || match.environment.key;
+  } else if (connected) {
+    projectName.textContent = 'Not selected';
+    environmentName.textContent = 'Not selected';
+  }
+  flagsSection.hidden = !(clientReady && collecting);
   clearButton.hidden = state.connected;
+  setFieldLocked(apiKeyInput, state.connected);
+  const targetLocked = state.collecting;
+  setFieldLocked(clientIdInput, targetLocked);
+  confirmClientIdButton.disabled = targetLocked || state.busy;
+  setFieldLocked(customerNameInput, targetLocked);
+  setFieldLocked(targetDomainInput, targetLocked);
+  observabilityInput.disabled = targetLocked;
+  sessionReplayInput.disabled = targetLocked;
+  updateStartButton();
 }
 
 function updateCustomerPreview() {
@@ -527,6 +623,15 @@ function createDivRow(div) {
   return row;
 }
 
+function cloneDivs(divs) {
+  return cleanSettings({ divs }).divs.map((div) => ({ ...div }));
+}
+
+async function writeDivSnapshot(divs) {
+  savedDivs = cloneDivs(divs);
+  await chrome.storage.local.set({ [DIV_SNAPSHOT_KEY]: savedDivs });
+}
+
 function renderDivList() {
   divList.replaceChildren(...state.divs.map(createDivRow));
   paintRowErrors();
@@ -568,18 +673,29 @@ function updateConnectButton() {
   connectButton.textContent = state.connected ? 'Disconnect' : 'Connect';
 }
 
+function updateStartButton() {
+  if (state.busy) return;
+  startButton.textContent = state.collecting ? 'Stop' : 'Start';
+}
+
 function setBusy(busy, which) {
   state.busy = busy;
   connectButton.disabled = busy;
+  startButton.disabled = busy;
   updateButton.disabled = busy;
   importButton.disabled = busy;
   clearButton.disabled = busy;
   addButton.disabled = busy;
+  refreshDivsButton.disabled = busy;
+  confirmClientIdButton.disabled = busy || state.collecting;
   addAttributeButton.disabled = busy;
   updateContextButton.disabled = busy;
   if (busy && which === 'connect') connectButton.textContent = 'Connecting…';
   else if (busy && which === 'disconnect') connectButton.textContent = 'Disconnecting…';
   else updateConnectButton();
+  if (busy && which === 'start') startButton.textContent = 'Starting…';
+  else if (busy && which === 'stop') startButton.textContent = 'Stopping…';
+  else updateStartButton();
   updateButton.textContent = busy && which === 'update' ? 'Updating…' : 'Update Flags';
 }
 
@@ -597,7 +713,7 @@ function openModal({ title, body, items, confirmLabel, danger, keepLabel }) {
     modalConfirm.textContent = confirmLabel;
     modalConfirm.classList.toggle('danger', Boolean(danger));
     modalKeep.hidden = !keepLabel;
-    modalKeep.textContent = keepLabel || 'Clear settings, keep API key and client SDK key';
+    modalKeep.textContent = keepLabel || 'Clear settings, keep API key and client ID';
     modalActions.classList.toggle('stacked', Boolean(keepLabel));
     modal.hidden = false;
     const finish = (value) => {
@@ -729,6 +845,7 @@ async function runConnect(permissionPromise) {
   targetDomainInput.value = state.targetDomain;
   state.customerName = state.customerName.trim();
   customerNameInput.value = state.customerName;
+  await assignAnonymousKey(state.targetDomain);
   await persist({ keepDomain: true });
   const [granted, result] = await Promise.all([
     permissionPromise,
@@ -787,6 +904,7 @@ async function runDisconnect() {
   setBusy(true, 'disconnect');
   setMessage(connectError, '');
   state.connected = false;
+  state.collecting = false;
   state.divs = divs;
   state.notice = '';
   setDot(false);
@@ -811,22 +929,31 @@ connectButton.addEventListener('click', () => {
   }
   captureForm();
   editVersion += 1;
-  const validation = validateConnectionInput(connectFields());
-  showConnectionErrors(validation.errors);
-  updateCustomerPreview();
-  if (!validation.ok) return;
-  state.customerName = validation.customerName;
-  state.targetDomain = validation.domain;
-  customerNameInput.value = state.customerName;
-  targetDomainInput.value = state.targetDomain;
-  domainPermissionPending = true;
-  const permissionPromise = chrome.permissions.request({ origins: permissionOrigins(validation.domain) }).catch(() => false);
+  const apiValidation = validateApiKey(state.apiKey);
+  setMessage(apiKeyError, apiValidation.error);
+  setMessage(connectError, '');
+  if (!apiValidation.ok) return;
+  const domain = normalizeDomain(state.targetDomain);
+  const domainReady = Boolean(domain && isValidHostname(domain));
+  if (domain && !domainReady) setMessage(domainError, 'Enter a hostname such as launchdarkly.com.');
+  if (domainReady) {
+    state.targetDomain = domain;
+    targetDomainInput.value = domain;
+  }
+  domainPermissionPending = domainReady;
+  const permissionPromise = domainReady
+    ? chrome.permissions.request({ origins: permissionOrigins(domain) }).catch(() => false)
+    : Promise.resolve(true);
   runConnect(permissionPromise).finally(() => {
     domainPermissionPending = false;
   });
 });
 
 targetDomainInput.addEventListener('change', () => {
+  if (state.collecting) {
+    targetDomainInput.value = state.targetDomain;
+    return;
+  }
   if (!targetDomainInput.value.trim() && domainPermissionPending && state.targetDomain) {
     targetDomainInput.value = state.targetDomain;
     return;
@@ -840,16 +967,18 @@ targetDomainInput.addEventListener('change', () => {
   updateContextPreview();
   updateSiteStatus();
   if (!normalized || !isValidHostname(normalized)) {
-    setMessage(domainError, normalized ? 'Enter a hostname such as launchdarkly.com.' : 'Target domain is required.');
+    setMessage(domainError, normalized ? 'Enter a hostname such as launchdarkly.com.' : '');
     schedulePersist();
     return;
   }
   setMessage(domainError, '');
+  void assignAnonymousKey(normalized);
   domainPermissionPending = true;
   void persist({ keepDomain: true });
   const permissionPromise = chrome.permissions.request({ origins: permissionOrigins(normalized) }).catch(() => false);
   permissionPromise.then(async (granted) => {
     try {
+      await assignAnonymousKey(normalized);
       await retireDomain(previous, normalized);
       state.persistedDomain = normalized;
       state.targetDomain = normalized;
@@ -898,6 +1027,121 @@ anonymousInput.addEventListener('change', () => {
   scheduleContextPush();
 });
 
+async function applyTelemetryChange() {
+  if (state.collecting) return;
+  state.observability = observabilityInput.checked;
+  state.sessionReplay = sessionReplayInput.checked;
+  editVersion += 1;
+  await persist();
+}
+
+observabilityInput.addEventListener('change', () => {
+  applyTelemetryChange().catch(() => {});
+});
+
+sessionReplayInput.addEventListener('change', () => {
+  applyTelemetryChange().catch(() => {});
+});
+
+function targetTabs() {
+  const target = normalizeDomain(state.targetDomain);
+  return chrome.tabs.query({}).then((tabs) => tabs.filter((tab) => {
+    if (!tab.id || !tab.url || !target) return false;
+    try {
+      return hostMatchesTarget(new URL(tab.url).hostname, target);
+    } catch {
+      return false;
+    }
+  }));
+}
+
+async function startCollection(permissionPromise) {
+  setBusy(true, 'start');
+  setMessage(targetError, '');
+  const previousDomain = state.persistedDomain;
+  state.collecting = true;
+  updateVisibility();
+  await assignAnonymousKey(state.targetDomain);
+  await persist({ keepDomain: true });
+  const granted = await permissionPromise;
+  if (previousDomain !== state.targetDomain) await retireDomain(previousDomain, state.targetDomain);
+  if (!granted) {
+    state.collecting = false;
+    await persist({ keepDomain: true });
+    updateVisibility();
+    setMessage(domainError, 'Target domain permission was denied. DOM changes stay off until you allow access.');
+    setBusy(false);
+    return;
+  }
+  state.persistedDomain = state.targetDomain;
+  await send({ type: MSG.SYNC_REGISTRATION });
+  const delivered = await messageTabs({ type: MSG.RECONFIGURE, force: true });
+  if (!delivered) {
+    const tabs = await targetTabs();
+    if (tabs.length) {
+      const proceed = await openModal({
+        title: 'Reload target page',
+        body: 'The target page will reload so Observability and Session replay can start.',
+        confirmLabel: 'Reload'
+      });
+      if (!proceed) {
+        state.collecting = false;
+        await persist({ keepDomain: true });
+        updateVisibility();
+        setBusy(false);
+        return;
+      }
+      await Promise.all(tabs.map((tab) => chrome.tabs.reload(tab.id)));
+    }
+  }
+  updateVisibility();
+  setBusy(false);
+}
+
+async function stopCollection() {
+  setBusy(true, 'stop');
+  setMessage(targetError, '');
+  state.collecting = false;
+  updateVisibility();
+  await persist({ keepDomain: true });
+  await messageTabs({ type: MSG.RECONFIGURE, force: true });
+  setBusy(false);
+}
+
+startButton.addEventListener('click', () => {
+  if (state.collecting) {
+    stopCollection();
+    return;
+  }
+  captureForm();
+  editVersion += 1;
+  setMessage(targetError, '');
+  if (!state.connected) {
+    setMessage(targetError, 'Connect to LaunchDarkly before starting.');
+    return;
+  }
+  if (!state.clientSideId) {
+    setMessage(targetError, 'Enter a client ID before starting.');
+    return;
+  }
+  if (!state.observability && !state.sessionReplay) {
+    setMessage(targetError, 'Turn on Observability or Session replay before starting.');
+    return;
+  }
+  const domain = normalizeDomain(state.targetDomain);
+  if (!domain || !isValidHostname(domain)) {
+    setMessage(domainError, domain ? 'Enter a hostname such as launchdarkly.com.' : 'Target domain is required.');
+    return;
+  }
+  state.targetDomain = domain;
+  targetDomainInput.value = domain;
+  domainPermissionPending = true;
+  const permissionPromise = chrome.permissions.request({ origins: permissionOrigins(domain) }).catch(() => false);
+  startCollection(permissionPromise).finally(() => {
+    domainPermissionPending = false;
+  });
+});
+
 userKeyInput.addEventListener('input', () => {
   state.userKey = userKeyInput.value;
   editVersion += 1;
@@ -924,14 +1168,27 @@ updateContextButton.addEventListener('click', async () => {
 
 clientIdInput.addEventListener('input', () => {
   if (applyingClientId) return;
-  const value = clientIdInput.value.trim();
-  if (findEnvironmentByClientId(state.projects, value)) lookupClientId().catch(() => {});
-  else setMessage(clientIdError, '');
+  if (state.collecting) {
+    clientIdInput.value = state.clientSideId;
+    return;
+  }
+  setClientIdInvalid(false);
+  setMessage(clientIdError, '');
+  updateVisibility();
 });
 
-clientIdInput.addEventListener('change', () => {
-  if (applyingClientId) return;
+confirmClientIdButton.addEventListener('click', () => {
+  if (state.collecting) return;
   lookupClientId({ reportMiss: true }).catch(() => {});
+});
+
+refreshDivsButton.addEventListener('click', () => {
+  if (state.busy) return;
+  const token = ++clientLookup;
+  refreshDivsButton.disabled = true;
+  loadOwnedFlags(token).finally(() => {
+    refreshDivsButton.disabled = state.busy;
+  });
 });
 
 addButton.addEventListener('click', () => {
@@ -992,6 +1249,7 @@ updateButton.addEventListener('click', async () => {
   }
   paintRowErrors();
   renderSummary(executed.summary);
+  await writeDivSnapshot(state.divs);
   await reinstrumentPage();
 });
 
@@ -1009,9 +1267,9 @@ clearButton.addEventListener('click', async () => {
   if (state.connected || state.busy) return;
   const choice = await openModal({
     title: 'Clear settings?',
-    body: 'Keep API key and client SDK key keeps those two. Clear all removes everything.',
+    body: 'Keep API key and client ID keeps those two. Clear all removes everything.',
     confirmLabel: 'Clear settings all',
-    keepLabel: 'Clear settings, keep API key and client SDK key',
+    keepLabel: 'Clear settings, keep API key and client ID',
     danger: true
   });
   if (!choice || state.connected) return;
@@ -1028,7 +1286,7 @@ clearButton.addEventListener('click', async () => {
     : { apiKey: '' };
   editVersion += 1;
   clearTimeout(persistTimer);
-  Object.assign(state, defaultSettings(), kept, { persistedDomain: '' });
+  Object.assign(state, defaultSettings(), kept, { persistedDomain: '', anonymousKeyDomain: '' });
   apiKeyInput.value = state.apiKey;
   customerNameInput.value = '';
   targetDomainInput.value = '';
@@ -1052,7 +1310,8 @@ clearButton.addEventListener('click', async () => {
   for (const key of Object.keys(serverRowErrors)) delete serverRowErrors[key];
   await writeExtensionApiKey(state.apiKey);
   await chrome.storage.local.set({ [SETTINGS_KEY]: settingsFromState() });
-  await chrome.storage.local.remove([CONTEXT_DELIVERY_KEY, LAST_SYNC_KEY, SDK_STATUS_KEY, REGISTRATION_KEY]);
+  await chrome.storage.local.remove([CONTEXT_DELIVERY_KEY, LAST_SYNC_KEY, SDK_STATUS_KEY, REGISTRATION_KEY, DIV_SNAPSHOT_KEY, ANON_DOMAIN_KEY]);
+  savedDivs = [];
   await retireDomain(previousDomain, '');
   await messageEveryTab({ type: MSG.SHUTDOWN });
 });
@@ -1081,13 +1340,19 @@ async function runImport(file) {
   state.projectKey = config.projectKey;
   state.environmentKey = config.environmentKey;
   state.anonymous = config.anonymous;
+  state.observability = config.observability;
+  state.sessionReplay = config.sessionReplay;
+  state.collecting = false;
   state.userKey = config.userKey;
   state.attributes = config.attributes;
   state.divs = config.divs;
+  await writeDivSnapshot(state.divs);
   apiKeyInput.value = config.apiKey;
   customerNameInput.value = config.customerName;
   targetDomainInput.value = config.targetDomain;
   anonymousInput.checked = config.anonymous;
+  observabilityInput.checked = config.observability;
+  sessionReplayInput.checked = config.sessionReplay;
   userKeyInput.value = config.userKey;
   renderAttributeList();
   renderDivList();
@@ -1128,6 +1393,9 @@ function applyStoredSettings(settings) {
   state.clientSideId = settings.clientSideId;
   state.projects = settings.projects;
   state.anonymous = settings.anonymous;
+  state.observability = settings.observability;
+  state.sessionReplay = settings.sessionReplay;
+  state.collecting = Boolean(settings.connected && settings.collecting);
   state.userKey = settings.userKey;
   state.attributes = settings.attributes;
   state.divs = settings.divs;
@@ -1137,6 +1405,8 @@ function applyStoredSettings(settings) {
   customerNameInput.value = settings.customerName;
   targetDomainInput.value = settings.targetDomain;
   anonymousInput.checked = settings.anonymous;
+  observabilityInput.checked = settings.observability;
+  sessionReplayInput.checked = settings.sessionReplay;
   userKeyInput.value = settings.userKey;
   renderAttributeList();
   renderDivList();
@@ -1168,18 +1438,28 @@ async function init() {
   const stored = await chrome.storage.local.get([
     SETTINGS_KEY,
     ANON_KEY,
+    ANON_DOMAIN_KEY,
     SDK_STATUS_KEY,
     LAST_SYNC_KEY,
     REGISTRATION_KEY,
-    CONTEXT_DELIVERY_KEY
+    CONTEXT_DELIVERY_KEY,
+    DIV_SNAPSHOT_KEY
   ]);
   state.apiKey = await readExtensionApiKey();
   apiKeyInput.value = state.apiKey;
   state.anonymousUserKey = typeof stored[ANON_KEY] === 'string' && stored[ANON_KEY] ? stored[ANON_KEY] : createUuid();
-  if (stored[ANON_KEY] !== state.anonymousUserKey) {
-    await chrome.storage.local.set({ [ANON_KEY]: state.anonymousUserKey });
+  state.anonymousKeyDomain = normalizeDomain(typeof stored[ANON_DOMAIN_KEY] === 'string' ? stored[ANON_DOMAIN_KEY] : '');
+  const storedDomain = normalizeDomain(cleanSettings(stored[SETTINGS_KEY] || {}).targetDomain);
+  if (!state.anonymousKeyDomain && storedDomain) state.anonymousKeyDomain = storedDomain;
+  if (stored[ANON_KEY] !== state.anonymousUserKey || stored[ANON_DOMAIN_KEY] !== state.anonymousKeyDomain) {
+    await chrome.storage.local.set({
+      [ANON_KEY]: state.anonymousUserKey,
+      [ANON_DOMAIN_KEY]: state.anonymousKeyDomain
+    });
   }
   applyStoredSettings(cleanSettings(stored[SETTINGS_KEY] || {}));
+  savedDivs = Array.isArray(stored[DIV_SNAPSHOT_KEY]) ? cloneDivs(stored[DIV_SNAPSHOT_KEY]) : cloneDivs(state.divs);
+  if (!Array.isArray(stored[DIV_SNAPSHOT_KEY])) await writeDivSnapshot(savedDivs);
   if (stored[SDK_STATUS_KEY]?.message && !stored[SDK_STATUS_KEY]?.ok) setMessage(sdkStatus, stored[SDK_STATUS_KEY].message);
   if (stored[REGISTRATION_KEY]?.error) setMessage(domainError, stored[REGISTRATION_KEY].error);
   if (stored[LAST_SYNC_KEY]?.line) renderSummary(stored[LAST_SYNC_KEY]);

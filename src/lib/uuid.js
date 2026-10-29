@@ -7,6 +7,16 @@ export function createUuid(cryptoObj = globalThis.crypto) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+export function anonymousKeyForDomain({ anonymous, key, keyDomain, domain, uuid = createUuid }) {
+  const nextDomain = String(domain ?? '').trim();
+  const currentKey = typeof key === 'string' ? key.trim() : '';
+  const currentDomain = typeof keyDomain === 'string' ? keyDomain.trim() : '';
+  if (!anonymous || !nextDomain || (currentKey && currentDomain === nextDomain)) {
+    return { key: currentKey, domain: currentDomain };
+  }
+  return { key: uuid(), domain: nextDomain };
+}
+
 export async function ensureAnonymousKey(storage, uuid = createUuid) {
   const current = await storage.get(storage.anonKey);
   if (typeof current === 'string' && current.trim()) return current;

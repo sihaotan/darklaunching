@@ -121,6 +121,27 @@ export async function executeSync({
         });
       }
     }
+    if (typeof item.description === 'string') {
+      try {
+        await mutate(`/api/v2/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(item.identity.key)}`, {
+          ...request,
+          method: 'PATCH',
+          headers: { 'Content-Type': SEMANTIC_PATCH },
+          body: {
+            comment: 'DarkLaunching saved the CSS selector',
+            instructions: [{ kind: 'updateDescription', value: item.description }]
+          }
+        });
+        changed = true;
+      } catch (error) {
+        results.failed.push({
+          key: item.identity.key,
+          name: item.identity.name,
+          divId: item.div.id,
+          message: error.message || 'Could not save the CSS selector.'
+        });
+      }
+    }
     if (changed) results.updated.push({ key: item.identity.key, name: item.identity.name, divId: item.div.id });
   }
 

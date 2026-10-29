@@ -45,6 +45,7 @@
 
   // src/lib/api.js
   var LD_API_ORIGIN = "https://app.launchdarkly.com";
+  var LD_API_VERSION = "20240415";
   var MAX_PAGES = 200;
   var MAX_RETRY_WAIT_MS = 2e4;
   var LdError = class extends Error {
@@ -87,6 +88,7 @@
     const result = { Authorization: apiKey, Accept: "application/json" };
     if (body !== void 0) result["Content-Type"] = "application/json";
     if (headers) Object.assign(result, headers);
+    result["LD-API-Version"] = LD_API_VERSION;
     return result;
   }
   async function readError(response) {
@@ -280,6 +282,9 @@
       projects: [],
       anonymous: true,
       userKey: "",
+      observability: false,
+      sessionReplay: false,
+      collecting: false,
       attributes: [],
       divs: [],
       connected: false,
@@ -344,11 +349,18 @@
       projects: normalizeStoredProjects(merged.projects),
       anonymous: Boolean(merged.anonymous),
       userKey: String(merged.userKey ?? ""),
+      observability: Boolean(merged.observability),
+      sessionReplay: Boolean(merged.sessionReplay),
+      collecting: Boolean(merged.collecting),
       attributes: normalizeStoredAttributes(merged.attributes, uuid),
       divs: Array.isArray(merged.divs) ? merged.divs.map((div) => normalizeStoredDiv(div, uuid)) : [],
       connected: Boolean(merged.connected),
       notice: String(merged.notice ?? "")
     };
+  }
+  function validateApiKey(apiKey) {
+    if (!String(apiKey ?? "").trim()) return { ok: false, error: "API key is required." };
+    return { ok: true, error: "" };
   }
   function validateConnectionInput({ apiKey, customerName, targetDomain }) {
     const errors = {};
@@ -466,6 +478,7 @@
       tags: [OWNERSHIP_TAG, customerTag(customerName)].filter(Boolean),
       variations: [{ value: true }, { value: false }],
       defaults: { offVariation, onVariation: offVariation === 0 ? 1 : 0 },
+      description: String(div?.selector ?? "").trim(),
       clientSideAvailability: { usingEnvironmentId: true, usingMobileKey: false }
     };
   }
@@ -548,6 +561,8 @@
         continue;
       }
       const tagChange = customerTagChange(remote, customerName);
+      const description = String(item.div.selector || "").trim();
+      const descriptionChanged = String(remote.description || "") !== description;
       const current = offVariationValue(remote, environmentKey);
       if (current === void 0) {
         failures.push({
@@ -559,7 +574,7 @@
         continue;
       }
       const variationChanged = current !== item.div.defaultState;
-      if (!variationChanged && !tagChange) continue;
+      if (!variationChanged && !tagChange && !descriptionChanged) continue;
       let variationId = "";
       if (variationChanged) {
         variationId = variationIdForValue(remote, item.div.defaultState);
@@ -573,7 +588,12 @@
           continue;
         }
       }
-      updates.push({ ...item, ...variationId ? { variationId } : {}, ...tagChange || {} });
+      updates.push({
+        ...item,
+        ...variationId ? { variationId } : {},
+        ...tagChange || {},
+        ...descriptionChanged ? { description } : {}
+      });
     }
     for (const flag of flags || []) {
       if (!isOwned(flag, customerName)) continue;
@@ -592,10 +612,25 @@
 
   // src/lib/events.js
   var LD_EVENTS_ORIGIN = "https://events.launchdarkly.com";
+  var TELEMETRY_HOSTS = /* @__PURE__ */ new Set([
+    "events.launchdarkly.com",
+    "clientsdk.launchdarkly.com",
+    "clientstream.launchdarkly.com",
+    "pub.observability.app.launchdarkly.com",
+    "otel.observability.app.launchdarkly.com",
+    "pub.observability.app.eu.launchdarkly.com",
+    "otel.observability.app.eu.launchdarkly.com"
+  ]);
   function isLaunchDarklyEventsUrl(value) {
+    return isLaunchDarklyHost(value, /* @__PURE__ */ new Set(["events.launchdarkly.com"]));
+  }
+  function isLaunchDarklyTelemetryUrl(value) {
+    return isLaunchDarklyHost(value, TELEMETRY_HOSTS);
+  }
+  function isLaunchDarklyHost(value, hosts) {
     try {
       const url = new URL(value);
-      return url.protocol === "https:" && url.hostname === "events.launchdarkly.com" && url.username === "" && url.password === "";
+      return url.protocol === "https:" && hosts.has(url.hostname) && url.username === "" && url.password === "";
     } catch {
       return false;
     }
@@ -765,6 +800,27 @@
             name: item.identity.name,
             divId: item.div.id,
             message: error.message || "Could not update the flag tag."
+          });
+        }
+      }
+      if (typeof item.description === "string") {
+        try {
+          await mutate(`/api/v2/flags/${encodeURIComponent(projectKey)}/${encodeURIComponent(item.identity.key)}`, {
+            ...request,
+            method: "PATCH",
+            headers: { "Content-Type": SEMANTIC_PATCH },
+            body: {
+              comment: "DarkLaunching saved the CSS selector",
+              instructions: [{ kind: "updateDescription", value: item.description }]
+            }
+          });
+          changed = true;
+        } catch (error) {
+          results.failed.push({
+            key: item.identity.key,
+            name: item.identity.name,
+            divId: item.div.id,
+            message: error.message || "Could not save the CSS selector."
           });
         }
       }
@@ -939,6 +995,10 @@
         }
         if (!hostMatchesTarget(hostname, domain)) return;
         try {
+          await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["telemetry.js"], world: "MAIN" });
+        } catch {
+        }
+        try {
           await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["content.js"] });
         } catch {
         }
@@ -948,9 +1008,8 @@
   async function syncRegistrationNow() {
     try {
       const registered = await chrome.scripting.getRegisteredContentScripts();
-      if (registered.some((script) => script.id === SCRIPT_ID)) {
-        await chrome.scripting.unregisterContentScripts({ ids: [SCRIPT_ID] });
-      }
+      const ids = [SCRIPT_ID, `${SCRIPT_ID}-telemetry`].filter((id) => registered.some((script) => script.id === id));
+      if (ids.length) await chrome.scripting.unregisterContentScripts({ ids });
     } catch {
     }
     const settings = await loadSettings();
@@ -967,6 +1026,15 @@
     }
     try {
       await chrome.scripting.registerContentScripts([
+        {
+          id: `${SCRIPT_ID}-telemetry`,
+          matches: origins,
+          js: ["telemetry.js"],
+          world: "MAIN",
+          runAt: "document_start",
+          persistAcrossSessions: true,
+          allFrames: false
+        },
         {
           id: SCRIPT_ID,
           matches: origins,
@@ -999,14 +1067,15 @@
     if (disconnectRequested) return cancelledConnection();
     const apiKey = await readApiKey();
     const existing = await loadSettings();
+    const apiValidation = validateApiKey(apiKey);
+    if (!apiValidation.ok) return { ok: false, error: apiValidation.error };
     const customerName = String(message.customerName ?? existing.customerName).trim();
-    const targetDomain = String(message.targetDomain ?? existing.targetDomain);
-    const validation = validateConnectionInput({ apiKey, customerName, targetDomain });
-    if (!validation.ok) return { ok: false, error: Object.values(validation.errors)[0] };
+    const requestedDomain = normalizeDomain(String(message.targetDomain ?? existing.targetDomain));
+    const targetDomain = isValidHostname(requestedDomain) ? requestedDomain : requestedDomain ? existing.targetDomain : "";
     const base = {
       ...existing,
-      customerName: validation.customerName,
-      targetDomain: validation.domain,
+      customerName,
+      targetDomain,
       anonymous: Boolean(message.anonymous),
       userKey: String(message.userKey ?? ""),
       divs: Array.isArray(message.divs) ? message.divs : existing.divs
@@ -1172,20 +1241,34 @@
     await chrome.storage.local.set({ [CONTEXT_DELIVERY_KEY]: delivery });
     return delivery;
   }
+  function decodeRelayBody(message) {
+    if (message?.encoding === "base64") {
+      const binary = atob(String(message.body || ""));
+      const bytes = new Uint8Array(binary.length);
+      for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+      return bytes;
+    }
+    return typeof message?.body === "string" ? message.body : "";
+  }
   async function relayEvents(message) {
     const url = String(message?.url || "");
-    if (!isLaunchDarklyEventsUrl(url) || String(message?.method || "POST").toUpperCase() !== "POST") {
+    const method = String(message?.method || "POST").toUpperCase();
+    if (!isLaunchDarklyTelemetryUrl(url) || method !== "POST" && method !== "GET") {
       return { ok: false, error: "Refused LaunchDarkly events request." };
     }
-    const body = typeof message.body === "string" ? message.body : "";
-    if (body.length > 1e6) return { ok: false, error: "LaunchDarkly events payload is too large." };
+    const body = method === "GET" ? void 0 : decodeRelayBody(message);
+    const size = body == null ? 0 : typeof body === "string" ? body.length : body.byteLength;
+    const limit = isLaunchDarklyEventsUrl(url) || !url.includes(".observability.") ? 1e6 : 16e6;
+    if (size > limit) return { ok: false, error: "LaunchDarkly events payload is too large." };
     const headers = {};
     if (message.headers && typeof message.headers === "object") {
       for (const [key, value] of Object.entries(message.headers)) {
+        const name = key.toLowerCase();
+        if (name === "cookie" || name === "authorization" || name === "proxy-authorization") continue;
         if (typeof value === "string") headers[key] = value;
       }
     }
-    const response = await fetch(url, { method: "POST", headers, body });
+    const response = await fetch(url, body === void 0 ? { method, headers } : { method, headers, body });
     const responseHeaders = {};
     response.headers.forEach((value, key) => {
       responseHeaders[key] = value;

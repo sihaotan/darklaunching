@@ -108,6 +108,35 @@ label.check input {
   padding: 0;
 }
 
+.check-list {
+  display: grid;
+  grid-template-columns: max-content auto;
+  column-gap: 8px;
+  align-items: center;
+  width: 100%;
+}
+
+.check-list label.check {
+  display: grid;
+  grid-template-columns: subgrid;
+  grid-column: 1 / -1;
+  margin: 4px 0;
+}
+
+.check-list label.check span {
+  white-space: nowrap;
+}
+
+.check-list label.check input {
+  justify-self: start;
+  width: 16px;
+  height: 16px;
+}
+
+.telemetry-options {
+  margin-top: 12px;
+}
+
 input, select {
   width: 100%;
   border: 1px solid var(--line);
@@ -124,6 +153,66 @@ input:focus, select:focus, button:focus-visible {
 
 input:disabled {
   opacity: 0.45;
+}
+
+.field {
+  position: relative;
+  display: block;
+}
+
+.field.is-locked input {
+  padding-right: 34px;
+}
+
+.field.is-locked input:disabled {
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.field .lock {
+  display: none;
+}
+
+.field.is-locked .lock {
+  display: block;
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  margin-top: -8px;
+  color: var(--muted);
+  pointer-events: none;
+}
+
+.client-id-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.client-id-row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+button.tick {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  color: var(--ok);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+input.is-invalid {
+  border-color: var(--danger);
+}
+
+input.is-invalid:focus {
+  outline-color: var(--danger);
 }
 
 button {
@@ -343,14 +432,27 @@ pre {
 #add-div, #export-config { width: 100%; }
 
 #connect,
+#start-target,
 #attribute-actions {
   margin-top: 12px;
   margin-bottom: 12px;
 }
 
-#add-div {
+#selector-actions {
   margin-top: 12px;
-  margin-bottom: 0;
+}
+
+#selector-actions #add-div {
+  width: auto;
+  margin: 0;
+}
+
+#selector-actions button.icon.refresh {
+  flex: none;
+  width: 44px;
+  height: auto;
+  align-self: stretch;
+  color: var(--text);
 }
 
 #update-flags {
@@ -359,12 +461,18 @@ pre {
 }
 
 #connect,
+#start-target,
 #add-attribute,
 #update-context,
 #add-div,
 #update-flags {
   padding-top: 12px;
   padding-bottom: 12px;
+}
+
+.check-list input:disabled {
+  opacity: 1;
+  cursor: not-allowed;
 }
 
 #sync-results { margin-top: 8px; }

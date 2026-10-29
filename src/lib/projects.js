@@ -38,6 +38,13 @@ export function findEnvironmentByClientId(projects, clientId) {
   return null;
 }
 
+export function clientEnvironmentReady({ connected, projects, clientSideId, projectKey, environmentKey }) {
+  if (!connected) return false;
+  const match = findEnvironmentByClientId(projects, clientSideId);
+  if (!match?.project?.key || !match?.environment?.key) return false;
+  return match.project.key === projectKey && match.environment.key === environmentKey;
+}
+
 export function selectProjectEnvironment(projects, preferredProjectKey, preferredEnvironmentKey) {
   const notices = [];
   if (!projects.length) {
