@@ -95,3 +95,111 @@ The LaunchDarkly API key stays inside DarkLaunching. It is not loaded into the t
 - The target page receives the client-side ID only. That ID is what the client-side SDK uses to evaluate flags.
 
 Export Config downloads a JSON file from the popup. That file contains the API key in plain text so you can import the configuration later. The download is not sent to the target domain.
+
+## How to use DarkLaunching on a live domain
+
+This walkthrough shows how to use DarkLaunching for a feature, targeting, and observability demo on a live website. Install the extension first (see [Install in Chrome](#install-in-chrome)), then create an API access token (see [API access token](#api-access-token)).
+
+Open the live site you want to demo in Chrome, then open the DarkLaunching popup from the toolbar.
+
+### 1. Connect with your LaunchDarkly API key
+
+1. Paste your LaunchDarkly API access token into **LaunchDarkly API Key**.
+2. Click **Connect**.
+3. Chrome may ask for site access later when you set the target domain. Allow the host you will demo.
+
+![Connect with the LaunchDarkly API key](docs/images/01-connect.png)
+
+Connect only validates that the API key can talk to LaunchDarkly. Customer name, target domain, Observability, and Session replay come next.
+
+### 2. Choose the Client ID, then set the target
+
+1. Paste the environment **Client ID** from LaunchDarkly (**Project settings → Environments**).
+2. Click the green check mark beside the field.
+3. DarkLaunching fills in the matching **Project** and **Environment**.
+4. Enter a **Customer Name**. This becomes the flag name prefix and the `org` context attribute.
+5. Enter the **Target Domain** as a hostname only, such as `launchdarkly.com`.
+6. Turn on **Observability** and/or **Session replay** when those are part of the demo.
+7. Click **Start**.
+
+![Client ID, customer name, target domain, and Start](docs/images/02-client-id-and-target.png)
+
+Start locks the Client ID, customer name, target domain, and telemetry checkboxes. It also shows **User context** and **Edit CSS selector**. Click **Stop** when you need to change the domain or turn telemetry off.
+
+If the popup says the extension is inactive on this site, open a tab on the target hostname and allow site access when Chrome asks.
+
+### 3. Confirm the user context for targeting
+
+After **Start**, review **User context**. This is the context DarkLaunching sends for flag evaluation, Observability, and Session replay.
+
+1. Leave **Anonymous user** checked for a generated key, or clear it and enter a stable **User Key**.
+2. Check the auto-detected attributes: OS, browser, country, org (customer name), and domain (target domain).
+3. Use **+ Add attribute** for custom attributes when the demo needs them.
+4. Click **Update**, then open **Context preview** to confirm the JSON LaunchDarkly will receive.
+
+![User context and context preview](docs/images/03-user-context.png)
+
+In LaunchDarkly, open **Contexts** for that environment to show the same key and attributes during the demo.
+
+### 4. Copy a CSS selector from the live page
+
+1. On the live site, right-click the element you want to control and choose **Inspect**.
+2. In DevTools, right-click the highlighted node.
+3. Choose **Copy → Copy selector**.
+
+![Copy selector from Chrome DevTools](docs/images/04-copy-css-selector.png)
+
+### 5. Add the selector in DarkLaunching
+
+1. In **Edit CSS selector**, click **+ Add CSS selector**.
+2. Enter a short **Name**, such as `ld logo`.
+3. Paste the selector into **CSS Selector**.
+4. Set **Default State when Disabled** (usually **Serve False**).
+5. Set **When false** to **Hide element** or **Show element**.
+6. Click **Update Flags**.
+
+![Add a CSS selector row](docs/images/05-edit-css-selector.png)
+
+![Update Flags creates the flag](docs/images/06-update-flags.png)
+
+DarkLaunching creates a boolean flag named `{customer name} - {name}`, tags it with `darklaunching` and the customer tag, and stores the CSS selector in the flag **description**. New flags are created with targeting off. Use the refresh icon next to **+ Add CSS selector** to pull existing DarkLaunching flags for this customer and apply their selectors again.
+
+### 6. Show the flag in LaunchDarkly
+
+Open the project and environment you selected with the Client ID. The new flag appears with the CSS selector in the description and the `darklaunching` tag.
+
+![Flag list with CSS selector in the description](docs/images/07-flags-in-launchdarkly.png)
+
+### 7. Turn targeting on for the feature demo
+
+1. Open the flag and go to the **Targeting** tab for that environment.
+2. Turn the flag **On**.
+3. Set the default rule to **Serve: true** or **Serve: false**, or add rules that match the user context from step 3.
+4. Watch the live page. When the served variation is false and **When false** is **Hide element**, the selected DOM node is hidden. When it is true, the node is restored.
+5. Point to **Evaluations** on the Targeting or Monitoring tab to show flag traffic from the live page.
+
+![Flag targeting on with evaluations](docs/images/08-targeting-on.png)
+
+### 8. Observability and Session replay demo
+
+When **Observability** and **Session replay** were checked before **Start**:
+
+1. Browse and click through the live target domain while collection is running.
+2. In LaunchDarkly, open **Observability** for errors, performance, and related telemetry for that Client ID and environment.
+3. Open **Session replay** to find sessions for the context key shown in DarkLaunching’s context preview.
+4. Click **Stop** in DarkLaunching when the demo should stop sending Observability and Session replay data. Flag evaluation for CSS selectors continues until you disconnect or leave the target site.
+
+### Demo checklist
+
+| Goal | What to show |
+| --- | --- |
+| Feature control | CSS selector flag on a live element; toggle true/false in LaunchDarkly and watch the page |
+| Targeting | Anonymous or named context, custom attributes, and a targeting rule that matches that context |
+| Observability | Observability and Session replay checked before Start; live session and telemetry for the same context |
+
+### Tips
+
+- Use a hostname that matches the live tab. Subdomains of the target apex are included when you grant access.
+- After source changes, rebuild with `npm run build`, reload the extension on `chrome://extensions`, and reload the target page.
+- **Export Config** saves a JSON file that includes the API key. Store that file securely.
+- **Clear settings** can keep the API key and Client ID, or clear everything.
