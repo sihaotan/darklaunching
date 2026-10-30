@@ -2,6 +2,40 @@
 
 Chrome extension that manages LaunchDarkly flags for DOM elements on a target domain.
 
+## Install in Chrome
+
+DarkLaunching is loaded as an unpacked Manifest V3 extension. Chrome requires **Developer mode** for that.
+
+### Download
+
+1. Open the repository: [https://github.com/sihaotan/darklaunching](https://github.com/sihaotan/darklaunching).
+2. Click **Code → Download ZIP**, then unzip the file.
+3. Or clone it:
+
+```bash
+git clone https://github.com/sihaotan/darklaunching.git
+cd darklaunching
+```
+
+The loadable extension is in the `dist/` folder. If you change source files, rebuild first:
+
+```bash
+npm install
+npm run build
+```
+
+### Add the extension
+
+1. Open Chrome and go to `chrome://extensions`.
+2. Turn on **Developer mode** in the top-right corner.
+3. Click **Load unpacked**.
+4. Select the `dist` folder inside this project (the folder that contains `manifest.json`).
+5. Pin **DarkLaunching by LaunchDarkly** from the Extensions menu if you want the toolbar icon.
+
+After you change the source and run `npm run build`, return to `chrome://extensions` and click **Reload** on the DarkLaunching card. Reload the target page if content-script or telemetry behavior changed.
+
+To remove it later, open `chrome://extensions`, find DarkLaunching, and click **Remove**.
+
 ## API access token
 
 Create a token under **Organization settings → Authorization → Access tokens**, then paste it into the extension’s LaunchDarkly API Key field. This is the account API token, not an environment SDK key or client-side ID.
